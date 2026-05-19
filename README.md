@@ -19,6 +19,7 @@ Siri 的應用名稱仍然是 `Siri`。新版 Apple Intelligence 行為是 Siri 
 
 ```text
 IOPlatformExpertDevice.region-info
+IOPlatformExpertDevice.country-of-origin
   -> MobileGestalt RegionInfo / RegionCode
   -> eligibilityd
   -> generativeexperiencesd / modelcatalogd
@@ -29,13 +30,15 @@ IOPlatformExpertDevice.region-info
 
 ```text
 IOPlatformExpertDevice.region-info = CH/A
+IOPlatformExpertDevice.country-of-origin = CHN
 MobileGestalt RegionCode = CH
 ```
 
-只改某個 App、某個 UI、某個 plist 都不穩，因為每個新進程還會重新從 MobileGestalt / IORegistry 讀到 `CH/A`。本項目的關鍵是用 `CodexRegionSpoof.kext` 在內核側把根 IORegistry 的 `region-info` 改成：
+只改某個 App、某個 UI、某個 plist 都不穩，因為每個新進程還會重新從 MobileGestalt / IORegistry 讀到底層中國 SKU 身份。新版 `CodexRegionSpoof.kext` 會在內核側同時修正兩個根 IORegistry 值：
 
 ```text
-LL/A
+region-info = LL/A
+country-of-origin = USA
 ```
 
 這樣新進程自然讀到：
@@ -191,7 +194,7 @@ bless --create-snapshot
 `enable_apple_intelligence_oneclick.sh` 會做以下事情：
 
 1. 檢查 SIP / authenticated-root 狀態。
-2. 檢查 root IORegistry 的 `region-info`。
+2. 檢查 root IORegistry 的 `region-info` / `country-of-origin`。
 3. 安裝並載入 `CodexRegionSpoof.kext`。
 4. 安裝開機自動載入 kext 的 LaunchDaemon：
 
@@ -293,6 +296,7 @@ com.apple.assistant.backedup
 
 ```text
 IOPlatformExpertDevice.region-info = <4c4c2f41...>
+IOPlatformExpertDevice.country-of-origin = <"USA">
 CodexRegionSpoof loaded
 OS_ELIGIBILITY_DOMAIN_GREYMATTER              4
 OS_ELIGIBILITY_DOMAIN_FOUNDATION_MODELS       4
@@ -311,7 +315,7 @@ sudo tail -100 /var/log/codex-region-spoof-loader.log
 成功時應該能看到類似：
 
 ```text
-CodexRegionSpoof: set region-info LL/A ok=1
+CodexRegionSpoof: set region-info LL/A ok=1, country-of-origin USA ok=1
 ```
 
 ## 功能驗證
@@ -339,7 +343,7 @@ Siri 是否走新版界面
 ./enable_apple_intelligence_oneclick.sh --verify-only
 ```
 
-如果 `region-info` 仍然是 `CH/A`，說明 kext 沒有成功載入或沒有在 boot 後重新載入。
+如果 `region-info` 仍然是 `CH/A`，或 `country-of-origin` 仍然是 `CHN`，說明 kext 沒有成功載入或沒有在 boot 後重新載入。
 
 ### 2. Image Playground 出界面但功能用不了
 
@@ -347,6 +351,7 @@ Siri 是否走新版界面
 
 ```text
 region-info
+country-of-origin
 eligibility
 generativeexperiencesd
 modelcatalogd
@@ -424,4 +429,3 @@ sudo chflags nouchg /private/var/db/os_eligibility/eligibility.plist
 ```
 
 然後把備份拷回去，修正 owner / permission，最後重啟。
-

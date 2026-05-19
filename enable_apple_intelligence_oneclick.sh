@@ -71,7 +71,7 @@ Recovery prerequisites:
 
 What this single script does:
   - verifies SIP / SSV / root IORegistry region state
-  - installs/loads the kernel-side region-info spoof kext
+  - installs/loads the kernel-side region-info / country-of-origin spoof kext
   - installs a boot-time LaunchDaemon to reload that kext
   - patches Apple Intelligence eligibility domains to answer_t = 4
   - forces Siri SAE orchestration mode

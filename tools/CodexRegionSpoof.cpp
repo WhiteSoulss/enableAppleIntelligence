@@ -18,6 +18,7 @@ kern_return_t CodexRegionSpoof_start(kmod_info_t *, void *) {
         IOLog("CodexRegionSpoof: IOPlatformExpertDevice not found\n");
         return KERN_FAILURE;
     }
+
     unsigned char bytes[32] = {0};
     bytes[0] = 'L'; bytes[1] = 'L'; bytes[2] = '/'; bytes[3] = 'A';
     OSData *data = OSData::withBytes(bytes, sizeof(bytes));
@@ -25,10 +26,21 @@ kern_return_t CodexRegionSpoof_start(kmod_info_t *, void *) {
         IOLog("CodexRegionSpoof: OSData allocation failed\n");
         return KERN_RESOURCE_SHORTAGE;
     }
-    bool ok = platform->setProperty("region-info", data);
+    bool regionOK = platform->setProperty("region-info", data);
     data->release();
-    IOLog("CodexRegionSpoof: set region-info LL/A ok=%d\n", ok ? 1 : 0);
-    return ok ? KERN_SUCCESS : KERN_FAILURE;
+
+    unsigned char countryBytes[3] = {'U', 'S', 'A'};
+    OSData *country = OSData::withBytes(countryBytes, sizeof(countryBytes));
+    if (!country) {
+        IOLog("CodexRegionSpoof: country-of-origin OSData allocation failed\n");
+        return KERN_RESOURCE_SHORTAGE;
+    }
+    bool countryOK = platform->setProperty("country-of-origin", country);
+    country->release();
+
+    IOLog("CodexRegionSpoof: set region-info LL/A ok=%d, country-of-origin USA ok=%d\n",
+          regionOK ? 1 : 0, countryOK ? 1 : 0);
+    return (regionOK && countryOK) ? KERN_SUCCESS : KERN_FAILURE;
 }
 
 kern_return_t CodexRegionSpoof_stop(kmod_info_t *, void *) {
