@@ -1,7 +1,5 @@
 # 在 macOS 26.5 中國 SKU 上啟用 Apple Intelligence
 
-這份教程整理的是目前驗證成功的「根源路線」：不是逐個 App 做 UI patch，而是修正最上游的硬體地區來源，讓新啟動的系統進程自然看到非中國 SKU 的 region。
-
 已驗證可用的功能包括：
 
 ```text
@@ -50,8 +48,6 @@ RegionCode = LL
 然後再配合 eligibility plist 和 Siri SAE 狀態修正，讓 Apple Intelligence 的各條鏈路一起通過。
 
 ## 文件
-
-發布教程時，主流程只需要這些：
 
 ```text
 enable_apple_intelligence_oneclick.sh
@@ -429,14 +425,3 @@ sudo chflags nouchg /private/var/db/os_eligibility/eligibility.plist
 
 然後把備份拷回去，修正 owner / permission，最後重啟。
 
-## 重要結論
-
-這套方案的重點不是「把界面改出來」，而是把最上游的：
-
-```text
-IOPlatformExpertDevice.region-info
-```
-
-改成非中國 region，讓 MobileGestalt、eligibilityd、generativeexperiencesd、System Settings、Image Playground 等新進程自然走支援路徑。
-
-這也是為什麼不再推薦逐個進程 LLDB patch：那只能修一個 App、一個 UI，而不能讓 Writing Tools、Photos、Notifications、Siri、Image Playground 等系統級功能一起通過。
