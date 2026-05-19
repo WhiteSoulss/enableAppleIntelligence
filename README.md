@@ -380,11 +380,95 @@ com.apple.systemuiserver menuExtras = /System/Library/CoreServices/Siri.bundle
 
 然後重啟。這一步改的是 sealed system snapshot，沒有重啟前 live root 還是舊 snapshot。
 
-### 5. 可以重新打開 Full Security / authenticated-root 嗎
+### 5. 比較高安全狀態怎麼設置
 
-如果你還依賴 `CodexRegionSpoof.kext` 開機自動修正 root region，就不能直接恢復 Full Security；否則 kext 無法載入，系統會回到中國 SKU root region。
+在已經成功啟用 Apple Intelligence、並且 `country-of-origin = USA` / `region-info = LL/A` 後，可以把安全狀態收緊到比較高的狀態。
 
-如果未來 Apple 官方放開，或你不再需要這套修正，可以先移除 LaunchDaemon 和 kext，再考慮恢復安全策略。
+目標狀態：
+
+```text
+SIP: enabled
+Authenticated Root: enabled
+Startup Security: Reduced Security
+3rd Party Kexts: Enabled
+Signed System Volume: Enabled
+```
+
+這不是完整 Full Security。原因是本方案仍依賴 `CodexRegionSpoof.kext` 在開機時修正底層 IORegistry 身份；如果切回 Full Security，第三方 kext 很可能無法載入，下一次重啟後會回到中國 SKU 身份。
+
+推薦流程：
+
+1. 先確認 Apple Intelligence 已經可用，並確認底層值：
+
+   ```bash
+   ioreg -rd1 -c IOPlatformExpertDevice | grep -Ei 'region-info|country-of-origin'
+   ```
+
+   理想結果：
+
+   ```text
+   "country-of-origin" = <"USA">
+   "region-info" = <4c4c2f41...>   # LL/A
+   ```
+
+2. 進 Recovery，把 SIP 和 authenticated-root 打開：
+
+   ```bash
+   csrutil enable
+   csrutil authenticated-root enable
+   ```
+
+3. 仍然保留 Startup Security Utility 裡的：
+
+   ```text
+   Reduced Security
+   Allow user management of kernel extensions from identified developers
+   ```
+
+4. 重啟回 macOS 後檢查：
+
+   ```bash
+   csrutil status
+   csrutil authenticated-root status
+   sudo bputil -d | grep -E 'Security Mode|3rd Party Kexts|Signed System Volume'
+   ioreg -rd1 -c IOPlatformExpertDevice | grep -Ei 'region-info|country-of-origin'
+   sudo kmutil showloaded | grep -Ei 'Codex|RegionSpoof'
+   ```
+
+   理想結果：
+
+   ```text
+   System Integrity Protection status: enabled.
+   Authenticated Root status: enabled
+   Security Mode: Permissive / Reduced Security
+   3rd Party Kexts Status: Enabled
+   Signed System Volume Status: Enabled
+   country-of-origin = <"USA">
+   region-info = <4c4c2f41...>
+   local.codex.RegionSpoof loaded
+   ```
+
+5. 再重啟一次，再查同樣的值。第二次重啟後仍然保持 `USA + LL/A`，才算穩定。
+
+如果重啟後變回：
+
+```text
+country-of-origin = CHN
+region-info = CH/A
+```
+
+說明 kext 沒有在新的安全策略下成功載入。此時需要回 Recovery 重新設成 Reduced Security 並允許 kext，然後回 macOS 重新執行一鍵腳本。
+
+不要做：
+
+```text
+不要切回 Full Security
+不要移除 CodexRegionSpoof.kext
+不要移除 /Library/LaunchDaemons/local.codex.region-spoof-loader.plist
+不要再跑舊的 LLDB / UI patch 腳本
+```
+
+如果未來 Apple 官方放開，或你不再需要這套修正，可以先移除 LaunchDaemon 和 kext，再考慮恢復 Full Security。
 
 ## 還原
 
