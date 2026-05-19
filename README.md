@@ -1,4 +1,4 @@
-# 在 macOS 26.5 中國 SKU 上啟用 Apple Intelligence
+# 在 macOS 26.5 中國 SKU 上啟用 Apple Intelligence 感謝codex
 
 已驗證可用的功能包括：
 
