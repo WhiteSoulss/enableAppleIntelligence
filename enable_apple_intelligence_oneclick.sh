@@ -9,7 +9,7 @@ DO_INSTALL_LAUNCHDAEMON=1
 DO_LOAD_KEXT=1
 DO_ELIGIBILITY=1
 DO_SAE=1
-DO_LOCATION_CN_FIX=1
+DO_LOCATION_IP_FIX=1
 DO_VERIFY_ONLY=0
 
 KEXT="/Library/Extensions/CodexRegionSpoof.kext"
@@ -63,7 +63,7 @@ Options:
   --skip-launchdaemon   Do not install/update the boot-time kext loader.
   --skip-eligibility    Do not patch eligibility plists.
   --skip-sae            Do not force Siri SAE orchestration preference.
-  --skip-location-cn    Do not pin GeoServices location country cache to CN.
+  --skip-location-ip    Do not set GeoServices location country from public IP.
   -h, --help            Show this help.
 
 Recovery prerequisites:
@@ -75,11 +75,11 @@ Recovery prerequisites:
 
 What this single script does:
   - verifies SIP / SSV / root IORegistry region state
-  - installs/loads the kernel-side region-info spoof kext
+  - installs/loads the kernel-side region-info / country-of-origin spoof kext
   - installs a boot-time LaunchDaemon to reload that kext
   - patches Apple Intelligence eligibility domains to answer_t = 4
   - forces Siri SAE orchestration mode
-  - keeps GeoServices location country on CN so Maps/Weather can locate in China
+  - sets GeoServices location country from the current public IP exit country
   - refreshes affected availability clients
   - optionally patches the Siri Launchpad icon source and blesses a snapshot
 
@@ -101,7 +101,7 @@ while [[ $# -gt 0 ]]; do
       DO_INSTALL_LAUNCHDAEMON=0
       DO_ELIGIBILITY=0
       DO_SAE=0
-      DO_LOCATION_CN_FIX=0
+      DO_LOCATION_IP_FIX=0
       DO_ICON_FIX=0
       ;;
     --skip-kext)
@@ -116,8 +116,8 @@ while [[ $# -gt 0 ]]; do
     --skip-sae)
       DO_SAE=0
       ;;
-    --skip-location-cn)
-      DO_LOCATION_CN_FIX=0
+    --skip-location-ip|--skip-location-cn)
+      DO_LOCATION_IP_FIX=0
       ;;
     -h|--help)
       usage
@@ -293,25 +293,50 @@ KEXT="/Library/Extensions/CodexRegionSpoof.kext"
   echo "restarting AI availability daemons"
   /usr/bin/killall eligibilityd generativeexperiencesd modelcatalogd 2>/dev/null || true
 
-  echo "pinning GeoServices location country cache to CN for mainland Maps location"
+  echo "setting GeoServices location country cache from public IP"
+  GEO_CC=""
+  GEO_IP=""
+  GEO_CITY=""
+  GEO_REGION=""
+  GEO_LOC=""
+  if /usr/bin/curl -s --max-time 8 https://ipinfo.io/json >/tmp/codex_geo_ip.json 2>/dev/null; then
+    GEO_CC="$(/usr/bin/python3 -c 'import json,sys; print((json.load(open("/tmp/codex_geo_ip.json")).get("country") or "").upper())' 2>/dev/null || true)"
+    GEO_IP="$(/usr/bin/python3 -c 'import json; print(json.load(open("/tmp/codex_geo_ip.json")).get("ip",""))' 2>/dev/null || true)"
+    GEO_CITY="$(/usr/bin/python3 -c 'import json; print(json.load(open("/tmp/codex_geo_ip.json")).get("city",""))' 2>/dev/null || true)"
+    GEO_REGION="$(/usr/bin/python3 -c 'import json; print(json.load(open("/tmp/codex_geo_ip.json")).get("region",""))' 2>/dev/null || true)"
+    GEO_LOC="$(/usr/bin/python3 -c 'import json; print(json.load(open("/tmp/codex_geo_ip.json")).get("loc",""))' 2>/dev/null || true)"
+  fi
+  if [ -z "$GEO_CC" ]; then
+    GEO_CC="US"
+    GEO_IP="unknown"
+    GEO_CITY="unknown"
+    GEO_REGION="unknown"
+    GEO_LOC="unknown"
+    echo "public IP lookup failed; falling back to GeoServices country US"
+  fi
   /bin/mkdir -p /var/db/locationd/Library/Caches/GeoServices
-  /bin/cat > /var/db/locationd/Library/Caches/GeoServices/DirectReadConfigStore.plist <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>DeviceCountryCodeSourced</key>
-  <dict>
-    <key>cc</key>
-    <string>CN</string>
-    <key>metadata</key>
-    <dict/>
-    <key>source</key>
-    <integer>262</integer>
-  </dict>
-</dict>
-</plist>
-PLIST
+  /usr/bin/python3 - "$GEO_CC" "$GEO_IP" "$GEO_CITY" "$GEO_REGION" "$GEO_LOC" <<'PY'
+import plistlib
+import sys
+
+cc, ip, city, region, loc = sys.argv[1:6]
+payload = {
+    "DeviceCountryCodeSourced": {
+        "cc": cc,
+        "metadata": {
+            "sourceNote": "set from current public IP geolocation",
+            "ip": ip,
+            "city": city,
+            "region": region,
+            "loc": loc,
+        },
+        "source": 262,
+    }
+}
+with open("/var/db/locationd/Library/Caches/GeoServices/DirectReadConfigStore.plist", "wb") as f:
+    plistlib.dump(payload, f)
+PY
+  /bin/rm -f /tmp/codex_geo_ip.json 2>/dev/null || true
   /usr/sbin/chown _locationd:_locationd /var/db/locationd/Library/Caches/GeoServices/DirectReadConfigStore.plist 2>/dev/null || true
   /bin/chmod 0644 /var/db/locationd/Library/Caches/GeoServices/DirectReadConfigStore.plist 2>/dev/null || true
   /usr/bin/killall locationd geod routined 2>/dev/null || true
@@ -543,9 +568,29 @@ force_siri_sae_orchestration_mode() {
   defaults read "$SIRI_DOMAIN" "$SIRI_KEY" 2>/dev/null || true
 }
 
-pin_geoservices_location_country_cn() {
-  section "Pin GeoServices location country to CN"
-  local backup_dir="/private/var/db/locationd_cache_backup/geo-cn-$(date +%Y%m%d-%H%M%S)"
+detect_public_ip_geo() {
+  local json cc ip city region loc
+  json="$(/usr/bin/curl -s --max-time 8 https://ipinfo.io/json 2>/dev/null || true)"
+  if [[ -n "$json" ]]; then
+    cc="$(printf '%s' "$json" | /usr/bin/python3 -c 'import json,sys; print((json.load(sys.stdin).get("country") or "").upper())' 2>/dev/null || true)"
+    ip="$(printf '%s' "$json" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("ip",""))' 2>/dev/null || true)"
+    city="$(printf '%s' "$json" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("city",""))' 2>/dev/null || true)"
+    region="$(printf '%s' "$json" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("region",""))' 2>/dev/null || true)"
+    loc="$(printf '%s' "$json" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("loc",""))' 2>/dev/null || true)"
+  fi
+
+  GEO_IP_CC="${cc:-US}"
+  GEO_IP_ADDR="${ip:-unknown}"
+  GEO_IP_CITY="${city:-unknown}"
+  GEO_IP_REGION="${region:-unknown}"
+  GEO_IP_LOC="${loc:-unknown}"
+}
+
+pin_geoservices_location_country_from_ip() {
+  section "Set GeoServices location country from public IP"
+  detect_public_ip_geo
+
+  local backup_dir="/private/var/db/locationd_cache_backup/geo-ip-${GEO_IP_CC}-$(date +%Y%m%d-%H%M%S)"
 
   run_root mkdir -p "$GEOSERVICES_DIR" "$backup_dir"
   if [[ -e "$GEOSERVICES_DIRECT_STORE" ]]; then
@@ -555,33 +600,38 @@ pin_geoservices_location_country_cn() {
 
   local tmp_store
   tmp_store="$(mktemp)"
-  cat > "$tmp_store" <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>DeviceCountryCodeSourced</key>
-  <dict>
-    <key>cc</key>
-    <string>CN</string>
-    <key>metadata</key>
-    <dict/>
-    <key>source</key>
-    <integer>262</integer>
-  </dict>
-</dict>
-</plist>
-EOF
+  /usr/bin/python3 - "$tmp_store" "$GEO_IP_CC" "$GEO_IP_ADDR" "$GEO_IP_CITY" "$GEO_IP_REGION" "$GEO_IP_LOC" <<'PY'
+import plistlib
+import sys
+
+path, cc, ip, city, region, loc = sys.argv[1:7]
+payload = {
+    "DeviceCountryCodeSourced": {
+        "cc": cc,
+        "metadata": {
+            "sourceNote": "set from current public IP geolocation",
+            "ip": ip,
+            "city": city,
+            "region": region,
+            "loc": loc,
+        },
+        "source": 262,
+    }
+}
+with open(path, "wb") as f:
+    plistlib.dump(payload, f)
+PY
   run_root install -o _locationd -g _locationd -m 0644 "$tmp_store" "$GEOSERVICES_DIRECT_STORE"
   rm -f "$tmp_store"
 
+  echo "Detected public IP country: ${GEO_IP_CC} (${GEO_IP_ADDR}, ${GEO_IP_CITY}, ${GEO_IP_REGION}, ${GEO_IP_LOC})"
   echo "-- GeoServices DirectReadConfigStore --"
   run_root plutil -p "$GEOSERVICES_DIRECT_STORE" 2>/dev/null || true
 
   killall Maps Weather 2>/dev/null || true
   killall CoreLocationAgent 2>/dev/null || true
   run_root killall locationd geod routined 2>/dev/null || true
-  echo "Pinned location country cache to CN. Reopen Maps/Weather and test current location."
+  echo "Set location country cache from public IP. Reopen Maps/Weather and test current location."
 }
 
 restore_siri_menu_bar_extra() {
@@ -654,7 +704,7 @@ section "Preflight"
 echo "Workspace: $ROOT_DIR"
 echo "macOS: $(sw_vers -productVersion 2>/dev/null || true)"
 
-if [[ "$DO_VERIFY_ONLY" == "0" && ( "$DO_LOAD_KEXT" == "1" || "$DO_INSTALL_LAUNCHDAEMON" == "1" || "$DO_ELIGIBILITY" == "1" || "$DO_LOCATION_CN_FIX" == "1" || "$DO_ICON_FIX" == "1" ) ]]; then
+if [[ "$DO_VERIFY_ONLY" == "0" && ( "$DO_LOAD_KEXT" == "1" || "$DO_INSTALL_LAUNCHDAEMON" == "1" || "$DO_ELIGIBILITY" == "1" || "$DO_LOCATION_IP_FIX" == "1" || "$DO_ICON_FIX" == "1" ) ]]; then
   section "sudo"
   echo "Requesting sudo once for kext/eligibility/system-snapshot operations..."
   sudo_keepalive_start
@@ -675,7 +725,7 @@ fi
 [[ "$DO_INSTALL_LAUNCHDAEMON" == "1" ]] && install_region_spoof_launchdaemon
 [[ "$DO_ELIGIBILITY" == "1" ]] && patch_eligibility_domains
 [[ "$DO_SAE" == "1" ]] && force_siri_sae_orchestration_mode
-[[ "$DO_LOCATION_CN_FIX" == "1" ]] && pin_geoservices_location_country_cn
+[[ "$DO_LOCATION_IP_FIX" == "1" ]] && pin_geoservices_location_country_from_ip
 
 refresh_ai_clients
 restore_siri_menu_bar_extra

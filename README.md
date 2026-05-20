@@ -49,14 +49,14 @@ RegionCode = LL
 
 然後再配合 eligibility plist 和 Siri SAE 狀態修正，讓 Apple Intelligence 的各條鏈路一起通過。
 
-定位是另一條鏈。Apple Intelligence 需要 root identity 顯示為 `LL/A + USA`，但中國大陸的 Apple Maps / Weather 定位通常仍需要 `locationd` / GeoServices 使用中國定位 provider。因此一鍵腳本會額外固定：
+定位是另一條鏈。Apple Intelligence 需要 root identity 顯示為 `LL/A + USA`，但 Apple Maps / Weather 定位會參考 `locationd` / GeoServices 的國家配置。新版一鍵腳本會根據「當前出口 IP 的地理國家」自動寫入：
 
 ```text
 /var/db/locationd/Library/Caches/GeoServices/DirectReadConfigStore.plist
-DeviceCountryCodeSourced.cc = CN
+DeviceCountryCodeSourced.cc = <current public IP country>
 ```
 
-這不會把 IORegistry 改回中國 SKU，只是讓地圖定位繼續走適合中國網絡環境的 GeoServices 配置。
+這不會把 IORegistry 改回中國 SKU，只是讓地圖定位使用與當前網絡出口更一致的 GeoServices 配置。
 
 ## 文件
 
@@ -213,7 +213,7 @@ bless --create-snapshot
 
 5. 修改 Apple Intelligence 相關 eligibility domains。
 6. 將 Siri SAE orchestration mode 設成 `4`。
-7. 將 GeoServices 定位國家 cache 固定為 `CN`，避免中國大陸環境下 Maps 定位按鈕不可用。
+7. 根據當前出口 IP 自動寫入 GeoServices 定位國家 cache。
 8. 重啟相關服務：
 
    ```text
@@ -399,10 +399,10 @@ com.apple.systemuiserver menuExtras = /System/Library/CoreServices/Siri.bundle
 View -> Go to Current Location
 ```
 
-如果這個項目是灰色，通常不是 Maps 壞了，而是 `locationd` / GeoServices 的定位國家配置不適合當前中國網絡環境。一鍵腳本默認會把：
+如果這個項目是灰色，通常不是 Maps 壞了，而是 `locationd` / GeoServices 的定位國家配置和當前網絡出口不一致。一鍵腳本默認會按當前出口 IP 寫入：
 
 ```text
-DeviceCountryCodeSourced.cc = CN
+DeviceCountryCodeSourced.cc = <current public IP country>
 ```
 
 寫入 GeoServices cache，然後重啟：
@@ -415,10 +415,10 @@ Maps
 Weather
 ```
 
-如果你不在中國大陸，或者不想改定位國家 cache，可以執行：
+如果你不想讓腳本改定位國家 cache，可以執行：
 
 ```bash
-./enable_apple_intelligence_oneclick.sh --skip-location-cn
+./enable_apple_intelligence_oneclick.sh --skip-location-ip
 ```
 
 ### 6. 比較高安全狀態怎麼設置
