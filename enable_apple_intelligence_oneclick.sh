@@ -502,20 +502,24 @@ console_uid() {
 
 clean_siri_location_rows_for_icon_fix() {
   if [[ ! -f "$CLIENTS_PLIST" ]]; then
-    echo "Location Services clients plist not present yet: $CLIENTS_PLIST"
-    return 0
+    echo "Location Services clients plist not present yet; seeding Siri.app row: $CLIENTS_PLIST"
   fi
 
   /usr/bin/python3 - "$CLIENTS_PLIST" <<'PY'
 import os
 import plistlib
+import grp
+import pwd
 import shutil
 import sys
 import time
 
 plist_path = sys.argv[1]
-with open(plist_path, "rb") as f:
-    data = plistlib.load(f)
+if os.path.exists(plist_path):
+    with open(plist_path, "rb") as f:
+        data = plistlib.load(f)
+else:
+    data = {}
 
 def is_siri_location_row(key, value):
     text = f"{key}\n{value}".lower()
@@ -527,28 +531,57 @@ def is_siri_location_row(key, value):
     )
 
 remove_keys = [key for key, value in data.items() if is_siri_location_row(key, value)]
-if not remove_keys:
-    print("removed=0")
-    raise SystemExit(0)
+user_prefix = None
+for key in remove_keys:
+    parts = str(key).split(":", 1)
+    if len(parts) == 2 and parts[0]:
+        user_prefix = parts[0]
+        break
+if user_prefix is None:
+    for key in data:
+        parts = str(key).split(":", 1)
+        if len(parts) == 2 and parts[0] and "-" in parts[0]:
+            user_prefix = parts[0]
+            break
+if user_prefix is None:
+    user_prefix = "C80F3519-643E-4FB1-8F4E-4F18A602D7D6"
 
 backup = f"{plist_path}.backup-codex-siri-icon-{time.strftime('%Y%m%d-%H%M%S')}"
-shutil.copy2(plist_path, backup)
+if os.path.exists(plist_path):
+    shutil.copy2(plist_path, backup)
 for key in remove_keys:
     data.pop(key, None)
+
+siri_key = f"{user_prefix}:p/System/Library/CoreServices/Siri.app:"
+old_siri = data.get(siri_key, {})
+token = old_siri.get("ClientStorageToken")
+if not isinstance(token, (bytes, bytearray)) or len(token) != 32:
+    token = os.urandom(32)
+data[siri_key] = {
+    "Authorized": True,
+    "BundlePath": "/System/Library/CoreServices/Siri.app",
+    "ClientStorageToken": bytes(token),
+    "Registered": True,
+}
 
 tmp = f"{plist_path}.codex-tmp"
 with open(tmp, "wb") as f:
     plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
 
-stat = os.stat(plist_path)
-os.chown(tmp, stat.st_uid, stat.st_gid)
-os.chmod(tmp, stat.st_mode & 0o7777)
+if os.path.exists(plist_path):
+    stat = os.stat(plist_path)
+    os.chown(tmp, stat.st_uid, stat.st_gid)
+    os.chmod(tmp, stat.st_mode & 0o7777)
+else:
+    os.chown(tmp, pwd.getpwnam("_locationd").pw_uid, grp.getgrnam("_locationd").gr_gid)
+    os.chmod(tmp, 0o600)
 os.replace(tmp, plist_path)
 
 print(f"backup={backup}")
 print(f"removed={len(remove_keys)}")
 for key in remove_keys:
     print(f"  {key}")
+print(f"ensured={siri_key}")
 PY
 }
 
@@ -578,9 +611,10 @@ apply_siri_location_icon_fix() {
   /usr/bin/killall lldb debugserver 2>/dev/null || true
   /bin/launchctl bootout "gui/$uid/com.apple.assistantd" 2>/dev/null || true
   /usr/bin/killall assistantd 2>/dev/null || true
-  clean_siri_location_rows_for_icon_fix || true
 
   /usr/bin/killall locationd 2>/dev/null || true
+  /bin/sleep 1
+  clean_siri_location_rows_for_icon_fix || true
   /bin/launchctl kickstart -k system/com.apple.locationd 2>/dev/null || true
   /bin/sleep 3
 
@@ -622,7 +656,21 @@ apply_siri_location_icon_fix() {
     echo "assistantd did not start before patch attempt" > "$lldb_log"
   fi
 
+  /bin/launchctl bootout "gui/$uid/com.apple.assistantd" 2>/dev/null || true
+  /usr/bin/killall assistantd 2>/dev/null || true
+  /usr/bin/killall locationd 2>/dev/null || true
+  /bin/sleep 1
   clean_siri_location_rows_for_icon_fix || true
+  /bin/launchctl kickstart -k system/com.apple.locationd 2>/dev/null || true
+  /bin/sleep 2
+
+  locationd_pid="$(/usr/bin/pgrep -x locationd | /usr/bin/head -1 || true)"
+  if [[ -n "$locationd_pid" ]]; then
+    /usr/bin/lldb --batch -p "$locationd_pid" \
+      -o "command script import \"$SIRI_LOCATIOND_PATCH\"" \
+      -o 'process detach' -o quit || true
+  fi
+
   /usr/bin/tail -40 "$lldb_log" 2>/dev/null || true
   /usr/bin/killall "System Settings" SecurityPrivacyExtension cfprefsd iconservicesagent IconServicesAgent 2>/dev/null || true
 }
@@ -1010,21 +1058,25 @@ clean_siri_location_rows_now() {
   local clients_plist="/var/db/locationd/clients.plist"
 
   if [[ ! -f "$clients_plist" ]]; then
-    echo "Location Services clients plist not present yet: $clients_plist"
-    return 0
+    echo "Location Services clients plist not present yet; seeding Siri.app row: $clients_plist"
   fi
 
   cat > "$cleaner" <<'PY'
 import os
 import plistlib
+import grp
+import pwd
 import shutil
 import sys
 import time
 
 plist_path = sys.argv[1]
 
-with open(plist_path, "rb") as f:
-    data = plistlib.load(f)
+if os.path.exists(plist_path):
+    with open(plist_path, "rb") as f:
+        data = plistlib.load(f)
+else:
+    data = {}
 
 def is_siri_location_row(key, value):
     text = f"{key}\n{value}".lower()
@@ -1036,25 +1088,58 @@ def is_siri_location_row(key, value):
     )
 
 remove_keys = [key for key, value in data.items() if is_siri_location_row(key, value)]
+user_prefix = None
+for key in remove_keys:
+    parts = str(key).split(":", 1)
+    if len(parts) == 2 and parts[0]:
+        user_prefix = parts[0]
+        break
+if user_prefix is None:
+    for key in data:
+        parts = str(key).split(":", 1)
+        if len(parts) == 2 and parts[0] and "-" in parts[0]:
+            user_prefix = parts[0]
+            break
+if user_prefix is None:
+    user_prefix = "C80F3519-643E-4FB1-8F4E-4F18A602D7D6"
+
 backup = f"{plist_path}.backup-codex-siri-icon-{time.strftime('%Y%m%d-%H%M%S')}"
-shutil.copy2(plist_path, backup)
+if os.path.exists(plist_path):
+    shutil.copy2(plist_path, backup)
 
 for key in remove_keys:
     data.pop(key, None)
+
+siri_key = f"{user_prefix}:p/System/Library/CoreServices/Siri.app:"
+old_siri = data.get(siri_key, {})
+token = old_siri.get("ClientStorageToken")
+if not isinstance(token, (bytes, bytearray)) or len(token) != 32:
+    token = os.urandom(32)
+data[siri_key] = {
+    "Authorized": True,
+    "BundlePath": "/System/Library/CoreServices/Siri.app",
+    "ClientStorageToken": bytes(token),
+    "Registered": True,
+}
 
 tmp = f"{plist_path}.codex-tmp"
 with open(tmp, "wb") as f:
     plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
 
-stat = os.stat(plist_path)
-os.chown(tmp, stat.st_uid, stat.st_gid)
-os.chmod(tmp, stat.st_mode & 0o7777)
+if os.path.exists(plist_path):
+    stat = os.stat(plist_path)
+    os.chown(tmp, stat.st_uid, stat.st_gid)
+    os.chmod(tmp, stat.st_mode & 0o7777)
+else:
+    os.chown(tmp, pwd.getpwnam("_locationd").pw_uid, grp.getgrnam("_locationd").gr_gid)
+    os.chmod(tmp, 0o600)
 os.replace(tmp, plist_path)
 
 print(f"backup={backup}")
 print(f"removed={len(remove_keys)}")
 for key in remove_keys:
     print(f"  {key}")
+print(f"ensured={siri_key}")
 PY
 
   run_root /usr/bin/python3 "$cleaner" "$clients_plist"
@@ -1084,11 +1169,12 @@ apply_siri_location_icon_runtime_fix_now() {
   run_root /usr/bin/killall lldb debugserver 2>/dev/null || true
   launchctl bootout "$assistantd_label" 2>/dev/null || true
   killall assistantd 2>/dev/null || true
-  clean_siri_location_rows_now || true
 
   echo
   echo "== 2. Restart and patch locationd so it does not associate back to com.apple.assistantd =="
   run_root /usr/bin/killall locationd 2>/dev/null || true
+  sleep 1
+  clean_siri_location_rows_now || true
   run_root /bin/launchctl kickstart -k system/com.apple.locationd 2>/dev/null || true
   sleep 3
 
@@ -1133,7 +1219,23 @@ apply_siri_location_icon_runtime_fix_now() {
   fi
 
   tail -35 "$lldb_log" || true
+
+  echo
+  echo "== 3b. Stop locationd first, then persist only the Siri.app CoreLocation row =="
+  launchctl bootout "$assistantd_label" 2>/dev/null || true
+  killall assistantd 2>/dev/null || true
+  run_root /usr/bin/killall locationd 2>/dev/null || true
+  sleep 1
   clean_siri_location_rows_now || true
+  run_root /bin/launchctl kickstart -k system/com.apple.locationd 2>/dev/null || true
+  sleep 2
+  locationd_pid="$(pgrep -x locationd | head -1 || true)"
+  if [[ -n "$locationd_pid" ]]; then
+    run_root /usr/bin/lldb --batch -p "$locationd_pid" \
+      -o "command script import \"$locationd_patch\"" \
+      -o 'process detach' -o quit > "$locationd_lldb_log" 2>&1 || true
+    tail -20 "$locationd_lldb_log" || true
+  fi
 
   echo
   echo "== 4. Restart UI and trigger new Siri registration =="
