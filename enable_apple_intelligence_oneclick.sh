@@ -310,115 +310,21 @@ load_region_spoof_kext() {
 }
 
 write_siri_location_icon_patch_payload() {
-  local assistant_tmp
   local locationd_tmp
 
-  assistant_tmp="$(mktemp)"
   locationd_tmp="$(mktemp)"
-
-  cat > "$assistant_tmp" <<'PY'
-"""
-Patch assistantd's AssistantServices effective Siri location bundle helpers.
-
-Location Services can show the old Siri icon when assistantd registers through
-AssistantServices.framework. This makes the effective CoreLocation identity
-resolve to /System/Library/CoreServices/Siri.app instead.
-"""
-
-import lldb
-import struct
-
-
-SIRI_APP = "/System/Library/CoreServices/Siri.app"
-FUNC_BUNDLE = "AFEffectiveSiriBundleForLocation"
-FUNC_PATH = "AFEffectiveSiriBundlePathForLocation"
-
-
-def _u64_from_expr(target, expr):
-    value = target.EvaluateExpression(expr)
-    if not value or not value.IsValid() or value.GetError().Fail():
-        raise RuntimeError(f"expression failed: {expr}: {value.GetError() if value else 'invalid'}")
-    return int(value.GetValue(), 0)
-
-
-def _find_func(target, name):
-    matches = target.FindFunctions(name)
-    if matches.GetSize() == 0:
-        raise RuntimeError(f"symbol not found: {name}")
-    symctx = matches.GetContextAtIndex(0)
-    addr = symctx.GetSymbol().GetStartAddress().GetLoadAddress(target)
-    if addr == lldb.LLDB_INVALID_ADDRESS:
-        raise RuntimeError(f"symbol has invalid load address: {name}")
-    return addr
-
-
-def _mov_x0_imm64(value):
-    chunks = [(value >> shift) & 0xFFFF for shift in (0, 16, 32, 48)]
-    insns = [0xD2800000 | (chunks[0] << 5)]
-    for hw in range(1, 4):
-        insns.append(0xF2800000 | (hw << 21) | (chunks[hw] << 5))
-    return b"".join(struct.pack("<I", i) for i in insns)
-
-
-def _patch_return_constant(process, func_addr, value, epilogue):
-    stub = _mov_x0_imm64(value) + epilogue + struct.pack("<I", 0xD65F03C0)
-    err = lldb.SBError()
-    old = process.ReadMemory(func_addr + 16, len(stub), err)
-    if err.Fail():
-        raise RuntimeError(f"read failed @ 0x{func_addr + 16:x}: {err}")
-    err = lldb.SBError()
-    written = process.WriteMemory(func_addr + 16, stub, err)
-    if err.Fail() or written != len(stub):
-        raise RuntimeError(f"write failed @ 0x{func_addr + 16:x}: {err}, written={written}")
-    return old, stub
-
-
-def __lldb_init_module(debugger, _dict):
-    target = debugger.GetSelectedTarget()
-    process = target.GetProcess()
-    if not process or not process.IsValid():
-        print("[patch-assistant-effective-siri-location] no process")
-        return
-
-    try:
-        bundle_obj = _u64_from_expr(
-            target,
-            f'(unsigned long long)[[NSBundle bundleWithPath:@"{SIRI_APP}"] retain]',
-        )
-        path_obj = _u64_from_expr(
-            target,
-            f'(unsigned long long)[@"{SIRI_APP}" retain]',
-        )
-        bundle_func = _find_func(target, FUNC_BUNDLE)
-        path_func = _find_func(target, FUNC_PATH)
-
-        err = lldb.SBError()
-        epilogue = process.ReadMemory(path_func + 88, 12, err)
-        if err.Fail() or len(epilogue) != 12:
-            raise RuntimeError(f"failed to read epilogue: {err}")
-
-        old_bundle, new_bundle = _patch_return_constant(process, bundle_func, bundle_obj, epilogue)
-        old_path, new_path = _patch_return_constant(process, path_func, path_obj, epilogue)
-
-        print(f"[patch-assistant-effective-siri-location] Siri app: {SIRI_APP}")
-        print(f"[patch-assistant-effective-siri-location] retained bundle=0x{bundle_obj:x} path=0x{path_obj:x}")
-        print(f"[patch-assistant-effective-siri-location] patched {FUNC_BUNDLE} @ 0x{bundle_func:x}+16")
-        print(f"  old={old_bundle.hex()} new={new_bundle.hex()}")
-        print(f"[patch-assistant-effective-siri-location] patched {FUNC_PATH} @ 0x{path_func:x}+16")
-        print(f"  old={old_path.hex()} new={new_path.hex()}")
-    except Exception as exc:
-        print(f"[patch-assistant-effective-siri-location] ERROR: {exc}")
-PY
 
   cat > "$locationd_tmp" <<'PY'
 """
-Runtime patch for the Location Services duplicate Siri rows.
+Runtime patch for the Location Services Siri identity.
 
-Do not synthesize a fake Siri.app row. The natural CoreLocation client for
-Siri is AssistantServices.framework, and System Settings resolves that as Siri.
-The duplicate rows come from derived identities such as com.apple.assistantd
-and older artificial /System/Library/CoreServices/Siri.app rows. Filter those
-at locationd's client-list boundary so every consumer sees the same list.
+The real CoreLocation authorization identity for Siri is
+AssistantServices.framework. Its bundle still carries the old siri-osx.icns,
+so System Settings shows the old icon even though Apple Intelligence is active.
+
+Keep that authorization identity intact, but rewrite only the display BundlePath
+returned by locationd to /System/Applications/Siri.app. Also filter stale rows
+created by older experiments, such as com.apple.assistantd or CoreServices/Siri.
 """
 
 import lldb
@@ -443,12 +349,31 @@ if (cdxf_origCopyClients == NULL) {
     NSArray *cdxf_keys = [(NSDictionary *)cdxf_clients allKeys];
     for (id cdxf_key in cdxf_keys) {
       id cdxf_val = [(NSDictionary *)cdxf_clients objectForKey:cdxf_key];
-      NSString *cdxf_s = [NSString stringWithFormat:@"%@ %@", cdxf_key, cdxf_val];
-      NSString *cdxf_lower = [cdxf_s lowercaseString];
-      if ([cdxf_lower containsString:@"com.apple.assistantd"] ||
-          [cdxf_lower containsString:@"/system/library/coreservices/siri.app"] ||
-          [cdxf_lower containsString:@"coreservices/siri.app"]) {
+      NSString *cdxf_keyLower = [[NSString stringWithFormat:@"%@", cdxf_key] lowercaseString];
+      NSString *cdxf_valLower = [[NSString stringWithFormat:@"%@", cdxf_val] lowercaseString];
+      BOOL cdxf_isAssistantServices =
+        [cdxf_keyLower containsString:@"assistantservices.framework"];
+
+      if ([cdxf_keyLower containsString:@"com.apple.assistantd"] ||
+          [cdxf_keyLower containsString:@"assistant_service"] ||
+          [cdxf_keyLower containsString:@"com.apple.siri"] ||
+          [cdxf_keyLower containsString:@"/system/library/coreservices/siri.app"] ||
+          [cdxf_keyLower containsString:@"/system/applications/siri.app"] ||
+          (!cdxf_isAssistantServices &&
+           ([cdxf_valLower containsString:@"com.apple.assistantd"] ||
+            [cdxf_valLower containsString:@"assistant_service"] ||
+            [cdxf_valLower containsString:@"com.apple.siri"] ||
+            [cdxf_valLower containsString:@"assistantservices.framework"] ||
+            [cdxf_valLower containsString:@"/system/library/coreservices/siri.app"] ||
+            [cdxf_valLower containsString:@"/system/applications/siri.app"]))) {
         [cdxf_filtered removeObjectForKey:cdxf_key];
+        continue;
+      }
+
+      if (cdxf_isAssistantServices && cdxf_val && [(NSObject *)cdxf_val isKindOfClass:[NSDictionary class]]) {
+        NSMutableDictionary *cdxf_rewritten = [(NSDictionary *)cdxf_val mutableCopy];
+        [cdxf_rewritten setObject:@"/System/Applications/Siri.app" forKey:@"BundlePath"];
+        [cdxf_filtered setObject:cdxf_rewritten forKey:cdxf_key];
       }
     }
     return cdxf_filtered;
@@ -479,7 +404,7 @@ PY
   run_root mkdir -p "$SIRI_LOCATION_FIX_DIR"
   run_root rm -f "$SIRI_LOCATION_FIX_DIR/patch_assistant_effective_siri_location_lldb.py"
   run_root install -o root -g wheel -m 644 "$locationd_tmp" "$SIRI_LOCATION_FIX_DIR/patch_locationd_skip_assistantd_association_lldb.py"
-  rm -f "$assistant_tmp" "$locationd_tmp"
+  rm -f "$locationd_tmp"
 }
 
 install_siri_location_icon_payload() {
@@ -502,7 +427,6 @@ set -u
 LOG="/var/log/codex-region-spoof-loader.log"
 KEXT="/Library/Extensions/CodexRegionSpoof.kext"
 SIRI_FIX_DIR="/Library/Scripts/Codex/SiriLocationIconFix"
-SIRI_ASSISTANTD_PATCH="$SIRI_FIX_DIR/patch_assistant_effective_siri_location_lldb.py"
 SIRI_LOCATIOND_PATCH="$SIRI_FIX_DIR/patch_locationd_skip_assistantd_association_lldb.py"
 ASSISTANTD_PLIST="/System/Library/LaunchAgents/com.apple.assistantd.plist"
 CLIENTS_PLIST="/var/db/locationd/clients.plist"
@@ -538,11 +462,18 @@ else:
     data = {}
 
 def is_siri_location_row(key, value):
-    text = f"{key}\n{value}".lower()
+    key_text = str(key).lower()
+    value_text = str(value).lower()
+    if "assistantservices.framework" in key_text:
+        return False
+    text = f"{key_text}\n{value_text}"
     return (
         "assistantd" in text
+        or "assistant_service" in text
         or "com.apple.siri" in text
+        or "assistantservices.framework" in text
         or "coreservices/siri.app" in text
+        or "system/applications/siri.app" in text
     )
 
 remove_keys = [key for key, value in data.items() if is_siri_location_row(key, value)]
@@ -1027,11 +958,18 @@ else:
     data = {}
 
 def is_siri_location_row(key, value):
-    text = f"{key}\n{value}".lower()
+    key_text = str(key).lower()
+    value_text = str(value).lower()
+    if "assistantservices.framework" in key_text:
+        return False
+    text = f"{key_text}\n{value_text}"
     return (
         "assistantd" in text
+        or "assistant_service" in text
         or "com.apple.siri" in text
+        or "assistantservices.framework" in text
         or "coreservices/siri.app" in text
+        or "system/applications/siri.app" in text
     )
 
 remove_keys = [key for key, value in data.items() if is_siri_location_row(key, value)]
@@ -1124,7 +1062,7 @@ apply_siri_location_icon_runtime_fix_now() {
     /usr/bin/lldb --batch -p "$spe_pid" \
       -o 'expr -l objc++ -O -- [NSClassFromString(@"CLLocationManager") userLocationClientsWithInfo]' \
       -o 'process detach' -o quit > "$clients_dump" 2>&1 || true
-    grep -Ei 'AssistantServices.framework|CoreServices/Siri.app|assistantd|assistant_service|com.apple.Siri' "$clients_dump" || true
+    grep -Ei 'AssistantServices.framework|System/Applications/Siri.app|CoreServices/Siri.app|assistantd|assistant_service|com.apple.Siri' "$clients_dump" || true
     echo "CoreLocation dump: $clients_dump"
   else
     echo "SecurityPrivacyExtension is not running; open Location Services to visually verify."

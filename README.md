@@ -88,7 +88,7 @@ SIP / authenticated-root
 Reduced Security
 第三方 kext
 /private/var/db/eligibilityd/*.plist
-sealed system snapshot（僅 --all / --fix-siri-icon 時）
+sealed system snapshot（僅當 Siri.app 的 Info.plist 曾被舊方案改壞、需要恢復時）
 ```
 
 你需要能接受：
@@ -163,7 +163,7 @@ tools/CodexRegionSpoof.kext
 
 並修正 owner / permission。
 
-## 可選：修 Siri Launchpad 圖標
+## 可選：刷新 Siri Launchpad 圖標
 
 如果 Apple Intelligence 已經可用，但 Launchpad 裡 Siri 圖標仍是舊圖標，可以執行：
 
@@ -177,25 +177,18 @@ tools/CodexRegionSpoof.kext
 ./enable_apple_intelligence_oneclick.sh --fix-siri-icon
 ```
 
-這一步會掛載可寫 system volume，刪除 Siri App 的：
+目前正確狀態是：
 
 ```text
-CFBundleIconName
+/System/Applications/Siri.app
+  CFBundleIconName = AppIcon
 ```
 
-讓 Launchpad 從 `CFBundleIconFile = AppIcon` 回退到：
+腳本會保留這個值，刷新 LaunchServices / IconServices / Spotlight 對 Siri.app 的註冊，讓系統使用 `/System/Applications/Siri.app` 的現代 AppIcon 資產。
 
-```text
-/System/Applications/Siri.app/Contents/Resources/AppIcon.icns
-```
+只有在你之前跑過舊版圖標補丁、把 `CFBundleIconName` 刪掉或改壞時，腳本才會嘗試把它恢復為 `AppIcon`。這種修復會涉及 sealed system snapshot，需先在 Recovery 裡關閉 authenticated-root，修復後再重啟。
 
-然後執行：
-
-```bash
-bless --create-snapshot
-```
-
-所以必須重啟後才會看到圖標變化。
+Location Services 裡 Siri 圖標是另一條路徑：它的權限身份是 `AssistantServices.framework`，但顯示圖標應該取 `/System/Applications/Siri.app`。主腳本會把這個 locationd runtime 修正合入既有的 `load-region-spoof.sh` 開機流程。
 
 ## 腳本具體做了什麼
 
@@ -233,7 +226,7 @@ bless --create-snapshot
 
 10. 發送 availability / eligibility notification。
 11. 恢復 Siri menu bar extra。
-12. 如果使用 `--all`，修正 Siri Launchpad 圖標來源並建立新 snapshot。
+12. 如果使用 `--all`，刷新 Siri Launchpad 圖標註冊；只有在舊補丁破壞過 Siri.app Info.plist 時才需要修復 snapshot。
 
 ## Eligibility 修改內容
 
@@ -343,7 +336,7 @@ Photos 是否有 Clean Up / 擦除
 Siri 是否走新版界面
 ```
 
-如果使用了 `--all`，Launchpad 裡 Siri 圖標需要重啟後再判斷。
+如果使用了 `--all`，Launchpad 裡 Siri 圖標需要重啟或重新登入後再判斷。
 
 ## 常見問題
 
@@ -390,7 +383,7 @@ com.apple.systemuiserver menuExtras = /System/Library/CoreServices/Siri.bundle
 ./enable_apple_intelligence_oneclick.sh --all
 ```
 
-然後重啟。這一步改的是 sealed system snapshot，沒有重啟前 live root 還是舊 snapshot。
+然後重啟或重新登入。這一步正常情況下只是刷新 Siri.app 的系統註冊；如果腳本提示 live `/System/Applications/Siri.app` 的 `CFBundleIconName` 不是 `AppIcon`，才代表你曾被舊方案改壞，需要用 authenticated-root disabled 的狀態修復 sealed snapshot。
 
 ### 5. Maps 定位按鈕沒反應
 
