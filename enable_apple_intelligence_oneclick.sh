@@ -12,6 +12,8 @@ DO_SAE=1
 DO_LOCATION_IP_FIX=1
 DO_SIRI_LOCATION_ICON_RUNTIME_FIX=1
 DO_VERIFY_ONLY=0
+DO_UNINSTALL=0
+DO_UNINSTALL_DRY_RUN=0
 
 KEXT="/Library/Extensions/CodexRegionSpoof.kext"
 LOCAL_KEXT="$ROOT_DIR/tools/CodexRegionSpoof.kext"
@@ -27,6 +29,7 @@ GEOSERVICES_DIRECT_STORE="${GEOSERVICES_DIR}/DirectReadConfigStore.plist"
 ELIGIBILITYD_PLIST="/private/var/db/eligibilityd/eligibility.plist"
 OS_ELIGIBILITY_PLIST="/private/var/db/os_eligibility/eligibility.plist"
 ELIGIBILITY_BACKUP_BASE="/private/var/db/eligibilityd_source_backup"
+UNINSTALL_BACKUP_ROOT="$HOME/Documents/Codex/enableAppleIntelligence-restore-backups/$(date +%Y%m%d-%H%M%S)"
 
 SIRI_DOMAIN="com.apple.assistant.backedup"
 SIRI_KEY="SiriAvailability"
@@ -61,6 +64,8 @@ Options:
   --fix-siri-icon       Patch Siri Launchpad icon source only.
                         Requires authenticated-root disabled and a reboot.
   --verify-only         Only print current state; do not change anything.
+  --uninstall           Back up local state, remove kext/LaunchDaemon, clear forced caches.
+  --dry-run             With --uninstall, print restore actions without changing anything.
   --skip-kext           Do not load CodexRegionSpoof.kext this run.
   --skip-launchdaemon   Do not install/update the boot-time kext loader.
   --skip-eligibility    Do not patch eligibility plists.
@@ -109,6 +114,27 @@ while [[ $# -gt 0 ]]; do
       DO_ELIGIBILITY=0
       DO_SAE=0
       DO_LOCATION_IP_FIX=0
+      DO_ICON_FIX=0
+      ;;
+    --uninstall)
+      DO_UNINSTALL=1
+      DO_LOAD_KEXT=0
+      DO_INSTALL_LAUNCHDAEMON=0
+      DO_ELIGIBILITY=0
+      DO_SAE=0
+      DO_LOCATION_IP_FIX=0
+      DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
+      DO_ICON_FIX=0
+      ;;
+    --dry-run)
+      DO_UNINSTALL=1
+      DO_UNINSTALL_DRY_RUN=1
+      DO_LOAD_KEXT=0
+      DO_INSTALL_LAUNCHDAEMON=0
+      DO_ELIGIBILITY=0
+      DO_SAE=0
+      DO_LOCATION_IP_FIX=0
+      DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
       DO_ICON_FIX=0
       ;;
     --skip-kext)
@@ -1208,6 +1234,165 @@ MSG
   echo "Reboot is required for the modified system snapshot to become the live root."
 }
 
+uninstall_run() {
+  echo "+ $*"
+  if [[ "$DO_UNINSTALL_DRY_RUN" == "0" ]]; then
+    "$@"
+  fi
+}
+
+uninstall_run_root() {
+  echo "+ sudo $*"
+  if [[ "$DO_UNINSTALL_DRY_RUN" == "0" ]]; then
+    run_root "$@"
+  fi
+}
+
+uninstall_backup_path() {
+  local src="$1"
+  local dst="$UNINSTALL_BACKUP_ROOT$src"
+  if [[ -e "$src" ]]; then
+    uninstall_run mkdir -p "$(dirname "$dst")"
+    uninstall_run_root cp -a "$src" "$dst"
+  fi
+}
+
+uninstall_backup_state() {
+  section "Back up current state"
+  uninstall_run mkdir -p "$UNINSTALL_BACKUP_ROOT"
+
+  uninstall_backup_path "$KEXT"
+  uninstall_backup_path "$LOADER_SCRIPT"
+  uninstall_backup_path "$LOADER_PLIST"
+  uninstall_backup_path "$SIRI_LOCATION_FIX_DIR"
+  uninstall_backup_path "$SIRI_LOCATION_FIX_AGENT"
+  uninstall_backup_path "$ELIGIBILITYD_PLIST"
+  uninstall_backup_path "$OS_ELIGIBILITY_PLIST"
+
+  if [[ "$DO_UNINSTALL_DRY_RUN" == "0" ]]; then
+    {
+      echo "== date =="
+      date
+      echo
+      echo "== csrutil =="
+      csrutil status 2>&1 || true
+      csrutil authenticated-root status 2>&1 || true
+      echo
+      echo "== IOPlatformExpertDevice =="
+      ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | grep -Ei '"region-info"|"country-of-origin"|"model"|"model-number"' || true
+      echo
+      echo "== loaded kext =="
+      run_root kmutil showloaded 2>/dev/null | grep -Ei 'Codex|RegionSpoof' || true
+      echo
+      echo "== GMS defaults =="
+      defaults read com.apple.gms.availability 2>/dev/null || true
+      echo
+      echo "== SiriAvailability =="
+      defaults read com.apple.assistant.backedup SiriAvailability 2>/dev/null || true
+      echo
+      echo "== generative assistant settings =="
+      defaults read com.apple.siri.generativeassistantsettings 2>/dev/null || true
+    } > "$UNINSTALL_BACKUP_ROOT/state-before.txt"
+  fi
+
+  echo "Backup directory: $UNINSTALL_BACKUP_ROOT"
+}
+
+uninstall_remove_launch_items() {
+  section "Remove launch items"
+  uninstall_run_root launchctl bootout system "$LOADER_PLIST" 2>/dev/null || true
+  uninstall_run_root rm -f "$LOADER_PLIST"
+  uninstall_run_root rm -f "$LOADER_SCRIPT"
+  uninstall_run_root rm -rf "$SIRI_LOCATION_FIX_DIR"
+
+  if [[ -f "$SIRI_LOCATION_FIX_AGENT" ]]; then
+    uninstall_run launchctl bootout "gui/$(id -u)" "$SIRI_LOCATION_FIX_AGENT" 2>/dev/null || true
+    uninstall_run rm -f "$SIRI_LOCATION_FIX_AGENT"
+  fi
+}
+
+uninstall_remove_kext() {
+  section "Unload and remove CodexRegionSpoof.kext"
+  if [[ -d "$KEXT" ]]; then
+    uninstall_run_root kmutil unload -p "$KEXT" 2>/dev/null || true
+    uninstall_run_root rm -rf "$KEXT"
+  else
+    echo "$KEXT not installed"
+  fi
+}
+
+uninstall_clear_eligibility_cache() {
+  section "Clear forced eligibility caches"
+  for plist in "$ELIGIBILITYD_PLIST" "$OS_ELIGIBILITY_PLIST"; do
+    if [[ -e "$plist" ]]; then
+      uninstall_run_root chflags nouchg "$plist" 2>/dev/null || true
+      uninstall_run_root rm -f "$plist"
+      echo "Removed $plist; eligibilityd will recompute it."
+    else
+      echo "$plist not present"
+    fi
+  done
+}
+
+uninstall_clear_user_defaults() {
+  section "Clear user-level Apple Intelligence force defaults"
+  uninstall_run defaults delete com.apple.gms.availability 2>/dev/null || true
+  uninstall_run defaults delete com.apple.siri.generativeassistantsettings isEnabled 2>/dev/null || true
+  uninstall_run defaults delete com.apple.assistant.backedup SiriAvailability 2>/dev/null || true
+}
+
+uninstall_restart_services() {
+  section "Restart related services"
+  uninstall_run_root killall eligibilityd generativeexperiencesd modelcatalogd 2>/dev/null || true
+  uninstall_run killall "System Settings" SiriPreferenceExtension SiriNCService Siri SystemUIServer Dock cfprefsd 2>/dev/null || true
+}
+
+uninstall_print_final_state() {
+  section "Current state after uninstall attempt"
+  csrutil status 2>&1 || true
+  csrutil authenticated-root status 2>&1 || true
+  echo
+  ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | grep -Ei '"region-info"|"country-of-origin"|"model"|"model-number"' || true
+  echo
+  if [[ "$DO_UNINSTALL_DRY_RUN" == "0" ]]; then
+    run_root kmutil showloaded 2>/dev/null | grep -Ei 'Codex|RegionSpoof' || echo "CodexRegionSpoof not loaded"
+  fi
+}
+
+run_uninstall_restore() {
+  section "Apple Intelligence uninstall / restore"
+  echo "Workspace: $ROOT_DIR"
+  echo "Dry run: $DO_UNINSTALL_DRY_RUN"
+  echo "This will remove the kext and clear forced eligibility caches. Reboot is required."
+
+  if [[ "$DO_UNINSTALL_DRY_RUN" == "0" ]]; then
+    sudo_keepalive_start
+  fi
+
+  uninstall_backup_state
+  uninstall_remove_launch_items
+  uninstall_remove_kext
+  uninstall_clear_eligibility_cache
+  uninstall_clear_user_defaults
+  uninstall_restart_services
+  uninstall_print_final_state
+
+  section "Next steps"
+  cat <<EOF
+1. Reboot.
+2. Check root identity:
+   ioreg -rd1 -c IOPlatformExpertDevice | grep -Ei 'region-info|country-of-origin'
+
+3. If you want Apple Pay / highest security back, enter Recovery and set:
+   - Full Security
+   - csrutil enable
+   - csrutil authenticated-root enable
+
+Backup saved at:
+  $UNINSTALL_BACKUP_ROOT
+EOF
+}
+
 final_hints() {
   echo
   echo "Useful verification commands:"
@@ -1219,6 +1404,11 @@ final_hints() {
 section "Preflight"
 echo "Workspace: $ROOT_DIR"
 echo "macOS: $(sw_vers -productVersion 2>/dev/null || true)"
+
+if [[ "$DO_UNINSTALL" == "1" ]]; then
+  run_uninstall_restore
+  exit 0
+fi
 
 if [[ "$DO_VERIFY_ONLY" == "0" && ( "$DO_LOAD_KEXT" == "1" || "$DO_INSTALL_LAUNCHDAEMON" == "1" || "$DO_ELIGIBILITY" == "1" || "$DO_LOCATION_IP_FIX" == "1" || "$DO_ICON_FIX" == "1" ) ]]; then
   section "sudo"

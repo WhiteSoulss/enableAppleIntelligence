@@ -514,7 +514,21 @@ region-info = CH/A
 
 ## 還原
 
-目前發布包只保留一個 `.sh`，所以還原使用手動步驟。
+目前發布包只保留一個 `.sh`，還原也從同一個入口執行：
+
+```bash
+./enable_apple_intelligence_oneclick.sh --uninstall
+```
+
+如果只想看它會做什麼，不實際修改：
+
+```bash
+./enable_apple_intelligence_oneclick.sh --dry-run
+```
+
+它會先備份目前狀態，再移除 kext / LaunchDaemon，解鎖並清除 eligibility cache，刪除用戶層 Apple Intelligence 強制 defaults，最後提示重啟。
+
+手動還原步驟如下。
 
 停用開機 kext loader：
 
