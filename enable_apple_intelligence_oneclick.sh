@@ -671,6 +671,18 @@ apply_siri_location_icon_fix() {
       -o 'process detach' -o quit || true
   fi
 
+  /bin/launchctl bootstrap "gui/$uid" "$ASSISTANTD_PLIST" 2>/dev/null || true
+  /bin/launchctl kickstart -k "gui/$uid/com.apple.assistantd" 2>/dev/null || true
+  /bin/sleep 5
+  assistantd_pid="$(/usr/bin/pgrep -x assistantd | /usr/bin/head -1 || true)"
+  if [[ -n "$assistantd_pid" ]]; then
+    /usr/bin/lldb --batch -p "$assistantd_pid" \
+      -o "command script import \"$SIRI_ASSISTANTD_PATCH\"" \
+      -o 'expr -l objc++ -O -- (id)AFEffectiveSiriBundleForLocation()' \
+      -o 'expr -l objc++ -O -- (id)AFEffectiveSiriBundlePathForLocation()' \
+      -o 'process detach' -o quit >> "$lldb_log" 2>&1 || true
+  fi
+
   /usr/bin/tail -40 "$lldb_log" 2>/dev/null || true
   /usr/bin/killall "System Settings" SecurityPrivacyExtension cfprefsd iconservicesagent IconServicesAgent 2>/dev/null || true
 }
@@ -1235,6 +1247,23 @@ apply_siri_location_icon_runtime_fix_now() {
       -o "command script import \"$locationd_patch\"" \
       -o 'process detach' -o quit > "$locationd_lldb_log" 2>&1 || true
     tail -20 "$locationd_lldb_log" || true
+  fi
+
+  echo
+  echo "== 3c. Restart assistantd so Launchpad Siri remains functional =="
+  launchctl bootstrap "gui/$(id -u)" "$assistantd_plist" 2>/dev/null || true
+  launchctl kickstart -k "$assistantd_label" 2>/dev/null || true
+  sleep 5
+  assistantd_pid="$(pgrep -x assistantd | head -1 || true)"
+  if [[ -z "$assistantd_pid" ]]; then
+    echo "assistantd did not restart; Siri Launchpad may not respond."
+  else
+    /usr/bin/lldb --batch -p "$assistantd_pid" \
+      -o "command script import \"$assistant_patch\"" \
+      -o 'expr -l objc++ -O -- (id)AFEffectiveSiriBundleForLocation()' \
+      -o 'expr -l objc++ -O -- (id)AFEffectiveSiriBundlePathForLocation()' \
+      -o 'process detach' -o quit > "$lldb_log" 2>&1 || true
+    tail -25 "$lldb_log" || true
   fi
 
   echo
