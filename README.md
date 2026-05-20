@@ -472,6 +472,22 @@ region-info = CH/A
 
 ## 還原
 
+推薦使用一鍵卸載/還原腳本：
+
+```bash
+./uninstall_restore_apple_intelligence.sh
+```
+
+它會先備份目前狀態，再移除 kext / LaunchDaemon，解鎖並清除 eligibility cache，刪除用戶層 Apple Intelligence 強制 defaults，最後提示重啟。
+
+如果只想看它會做什麼，不實際修改：
+
+```bash
+./uninstall_restore_apple_intelligence.sh --dry-run
+```
+
+手動還原步驟如下。
+
 停用開機 kext loader：
 
 ```bash
