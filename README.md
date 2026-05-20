@@ -77,14 +77,7 @@ tools/CodexRegionSpoof.kext/Contents/MacOS/CodexRegionSpoof.b64
 tools/CodexRegionSpoof.kext/Contents/MacOS/CodexRegionSpoof
 ```
 
-`enable_apple_intelligence_oneclick.sh` 是主入口。發布包內還包含少量必要 LLDB patch：
-
-```text
-patch_assistant_effective_siri_location_lldb.py
-patch_locationd_skip_assistantd_association_lldb.py
-```
-
-它們只用於 Location Services 裡 Siri 圖標的 runtime identity 修正；具體流程已合併在主腳本內，並會被主腳本安裝進既有的 `load-region-spoof.sh` 開機流程。舊的 LLDB、Image Playground、eligibility 分析腳本只是研究過程備份，不是教程主流程。
+`enable_apple_intelligence_oneclick.sh` 是唯一 `.sh` 入口。Location Services 裡 Siri 圖標的 runtime identity 修正也已合併在主腳本內，主腳本會在運行時生成必要的 LLDB patch，並安裝進既有的 `load-region-spoof.sh` 開機流程。舊的 LLDB、Image Playground、eligibility 分析腳本只是研究過程備份，不是教程主流程。
 
 ## 風險與前提
 
@@ -521,21 +514,7 @@ region-info = CH/A
 
 ## 還原
 
-推薦使用一鍵卸載/還原腳本：
-
-```bash
-./uninstall_restore_apple_intelligence.sh
-```
-
-它會先備份目前狀態，再移除 kext / LaunchDaemon，解鎖並清除 eligibility cache，刪除用戶層 Apple Intelligence 強制 defaults，最後提示重啟。
-
-如果只想看它會做什麼，不實際修改：
-
-```bash
-./uninstall_restore_apple_intelligence.sh --dry-run
-```
-
-手動還原步驟如下。
+目前發布包只保留一個 `.sh`，所以還原使用手動步驟。
 
 停用開機 kext loader：
 

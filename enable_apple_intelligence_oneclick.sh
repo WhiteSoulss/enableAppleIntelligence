@@ -274,23 +274,174 @@ load_region_spoof_kext() {
     grep -Ei '"region-info"|"country-of-origin"|"model"|"model-number"|"regulatory-model-number"' || true
 }
 
-install_siri_location_icon_payload() {
-  local required=(
-    "$ROOT_DIR/patch_assistant_effective_siri_location_lldb.py"
-    "$ROOT_DIR/patch_locationd_skip_assistantd_association_lldb.py"
-  )
+write_siri_location_icon_patch_payload() {
+  local assistant_tmp
+  local locationd_tmp
 
-  local required_file
-  for required_file in "${required[@]}"; do
-    if [[ ! -f "$required_file" ]]; then
-      echo "Missing required Siri Location icon fix file: $required_file" >&2
-      exit 1
-    fi
-  done
+  assistant_tmp="$(mktemp)"
+  locationd_tmp="$(mktemp)"
+
+  cat > "$assistant_tmp" <<'PY'
+"""
+Patch assistantd's AssistantServices effective Siri location bundle helpers.
+
+Location Services can show the old Siri icon when assistantd registers through
+AssistantServices.framework. This makes the effective CoreLocation identity
+resolve to /System/Library/CoreServices/Siri.app instead.
+"""
+
+import lldb
+import struct
+
+
+SIRI_APP = "/System/Library/CoreServices/Siri.app"
+FUNC_BUNDLE = "AFEffectiveSiriBundleForLocation"
+FUNC_PATH = "AFEffectiveSiriBundlePathForLocation"
+
+
+def _u64_from_expr(target, expr):
+    value = target.EvaluateExpression(expr)
+    if not value or not value.IsValid() or value.GetError().Fail():
+        raise RuntimeError(f"expression failed: {expr}: {value.GetError() if value else 'invalid'}")
+    return int(value.GetValue(), 0)
+
+
+def _find_func(target, name):
+    matches = target.FindFunctions(name)
+    if matches.GetSize() == 0:
+        raise RuntimeError(f"symbol not found: {name}")
+    symctx = matches.GetContextAtIndex(0)
+    addr = symctx.GetSymbol().GetStartAddress().GetLoadAddress(target)
+    if addr == lldb.LLDB_INVALID_ADDRESS:
+        raise RuntimeError(f"symbol has invalid load address: {name}")
+    return addr
+
+
+def _mov_x0_imm64(value):
+    chunks = [(value >> shift) & 0xFFFF for shift in (0, 16, 32, 48)]
+    insns = [0xD2800000 | (chunks[0] << 5)]
+    for hw in range(1, 4):
+        insns.append(0xF2800000 | (hw << 21) | (chunks[hw] << 5))
+    return b"".join(struct.pack("<I", i) for i in insns)
+
+
+def _patch_return_constant(process, func_addr, value, epilogue):
+    stub = _mov_x0_imm64(value) + epilogue + struct.pack("<I", 0xD65F03C0)
+    err = lldb.SBError()
+    old = process.ReadMemory(func_addr + 16, len(stub), err)
+    if err.Fail():
+        raise RuntimeError(f"read failed @ 0x{func_addr + 16:x}: {err}")
+    err = lldb.SBError()
+    written = process.WriteMemory(func_addr + 16, stub, err)
+    if err.Fail() or written != len(stub):
+        raise RuntimeError(f"write failed @ 0x{func_addr + 16:x}: {err}, written={written}")
+    return old, stub
+
+
+def __lldb_init_module(debugger, _dict):
+    target = debugger.GetSelectedTarget()
+    process = target.GetProcess()
+    if not process or not process.IsValid():
+        print("[patch-assistant-effective-siri-location] no process")
+        return
+
+    try:
+        bundle_obj = _u64_from_expr(
+            target,
+            f'(unsigned long long)[[NSBundle bundleWithPath:@"{SIRI_APP}"] retain]',
+        )
+        path_obj = _u64_from_expr(
+            target,
+            f'(unsigned long long)[@"{SIRI_APP}" retain]',
+        )
+        bundle_func = _find_func(target, FUNC_BUNDLE)
+        path_func = _find_func(target, FUNC_PATH)
+
+        err = lldb.SBError()
+        epilogue = process.ReadMemory(path_func + 88, 12, err)
+        if err.Fail() or len(epilogue) != 12:
+            raise RuntimeError(f"failed to read epilogue: {err}")
+
+        old_bundle, new_bundle = _patch_return_constant(process, bundle_func, bundle_obj, epilogue)
+        old_path, new_path = _patch_return_constant(process, path_func, path_obj, epilogue)
+
+        print(f"[patch-assistant-effective-siri-location] Siri app: {SIRI_APP}")
+        print(f"[patch-assistant-effective-siri-location] retained bundle=0x{bundle_obj:x} path=0x{path_obj:x}")
+        print(f"[patch-assistant-effective-siri-location] patched {FUNC_BUNDLE} @ 0x{bundle_func:x}+16")
+        print(f"  old={old_bundle.hex()} new={new_bundle.hex()}")
+        print(f"[patch-assistant-effective-siri-location] patched {FUNC_PATH} @ 0x{path_func:x}+16")
+        print(f"  old={old_path.hex()} new={new_path.hex()}")
+    except Exception as exc:
+        print(f"[patch-assistant-effective-siri-location] ERROR: {exc}")
+PY
+
+  cat > "$locationd_tmp" <<'PY'
+"""
+Runtime patch for the Location Services duplicate Siri row.
+
+When assistantd registers an effective CoreLocation identity, locationd can
+associate it back to the natural audit identity com.apple.assistantd. That
+creates a second Siri row using the old assistantd icon. This makes
+CLClientManagerAdapter syncgetAssociateRegistrationIdentity:withName: return
+false, so the old identity is not associated into the auth database.
+"""
+
+import lldb
+import struct
+
+
+METHOD = "syncgetAssociateRegistrationIdentity:withName:"
+CLASS = "CLClientManagerAdapter"
+RETURN_FALSE = struct.pack("<II", 0x52800000, 0xD65F03C0)
+
+
+def _eval_objc(target, expr):
+    value = target.EvaluateExpression(expr)
+    if not value or not value.IsValid() or value.GetError().Fail():
+        raise RuntimeError(f"expression failed: {expr}: {value.GetError() if value else 'invalid'}")
+    text = value.GetValue() or value.GetObjectDescription() or ""
+    return int(text, 0) & 0x7FFFFFFFFF
+
+
+def __lldb_init_module(debugger, _dict):
+    target = debugger.GetSelectedTarget()
+    process = target.GetProcess()
+    if not process or not process.IsValid():
+        print("[patch-locationd-association] no process")
+        return
+
+    try:
+        addr = _eval_objc(
+            target,
+            (
+                "@import ObjectiveC; "
+                f'(unsigned long long)method_getImplementation(class_getInstanceMethod((Class)objc_getClass("{CLASS}"), sel_registerName("{METHOD}")))'
+            ),
+        )
+        err = lldb.SBError()
+        old = process.ReadMemory(addr, len(RETURN_FALSE), err)
+        if err.Fail():
+            raise RuntimeError(f"read failed @ 0x{addr:x}: {err}")
+
+        err = lldb.SBError()
+        written = process.WriteMemory(addr, RETURN_FALSE, err)
+        if err.Fail() or written != len(RETURN_FALSE):
+            raise RuntimeError(f"write failed @ 0x{addr:x}: {err}, written={written}")
+
+        print(f"[patch-locationd-association] patched {CLASS} {METHOD} @ 0x{addr:x}")
+        print(f"  old={old.hex()} new={RETURN_FALSE.hex()}")
+    except Exception as exc:
+        print(f"[patch-locationd-association] ERROR: {exc}")
+PY
 
   run_root mkdir -p "$SIRI_LOCATION_FIX_DIR"
-  run_root install -o root -g wheel -m 644 "$ROOT_DIR/patch_assistant_effective_siri_location_lldb.py" "$SIRI_LOCATION_FIX_DIR/patch_assistant_effective_siri_location_lldb.py"
-  run_root install -o root -g wheel -m 644 "$ROOT_DIR/patch_locationd_skip_assistantd_association_lldb.py" "$SIRI_LOCATION_FIX_DIR/patch_locationd_skip_assistantd_association_lldb.py"
+  run_root install -o root -g wheel -m 644 "$assistant_tmp" "$SIRI_LOCATION_FIX_DIR/patch_assistant_effective_siri_location_lldb.py"
+  run_root install -o root -g wheel -m 644 "$locationd_tmp" "$SIRI_LOCATION_FIX_DIR/patch_locationd_skip_assistantd_association_lldb.py"
+  rm -f "$assistant_tmp" "$locationd_tmp"
+}
+
+install_siri_location_icon_payload() {
+  write_siri_location_icon_patch_payload
 }
 
 install_region_spoof_launchdaemon() {
@@ -882,8 +1033,8 @@ PY
 apply_siri_location_icon_runtime_fix_now() {
   section "Apply Location Services Siri icon runtime fix now"
 
-  local assistant_patch="$ROOT_DIR/patch_assistant_effective_siri_location_lldb.py"
-  local locationd_patch="$ROOT_DIR/patch_locationd_skip_assistantd_association_lldb.py"
+  local assistant_patch="$SIRI_LOCATION_FIX_DIR/patch_assistant_effective_siri_location_lldb.py"
+  local locationd_patch="$SIRI_LOCATION_FIX_DIR/patch_locationd_skip_assistantd_association_lldb.py"
   local assistantd_label="gui/$(id -u)/com.apple.assistantd"
   local assistantd_plist="/System/Library/LaunchAgents/com.apple.assistantd.plist"
   local lldb_cmds="/tmp/codex_fix_siri_location_icon_assistantd.lldb"
