@@ -14,6 +14,7 @@ DO_SIRI_LOCATION_ICON_RUNTIME_FIX=1
 DO_VERIFY_ONLY=0
 DO_UNINSTALL=0
 DO_UNINSTALL_DRY_RUN=0
+DO_ICON_ONLY=0
 
 KEXT="/Library/Extensions/CodexRegionSpoof.kext"
 LOCAL_KEXT="$ROOT_DIR/tools/CodexRegionSpoof.kext"
@@ -60,9 +61,10 @@ Usage:
   ./enable_apple_intelligence_oneclick.sh [options]
 
 Options:
-  --all                 Run core enable steps and the Siri Launchpad icon snapshot fix.
-  --fix-siri-icon       Patch Siri Launchpad icon source only.
-                        Requires authenticated-root disabled and a reboot.
+  --all                 Run core enable steps and refresh the Siri Launchpad icon registration.
+  --fix-siri-icon       Refresh Siri Launchpad icon registration only.
+                        Only needs authenticated-root disabled if the sealed
+                        Siri.app Info.plist was previously damaged.
   --verify-only         Only print current state; do not change anything.
   --uninstall           Back up local state, remove kext/LaunchDaemon, clear forced caches.
   --dry-run             With --uninstall, print restore actions without changing anything.
@@ -91,7 +93,7 @@ What this single script does:
   - sets GeoServices location country from the current public IP exit country
   - integrates the Location Services Siri icon fix into load-region-spoof.sh
   - refreshes affected availability clients
-  - optionally patches Siri Launchpad icon source and blesses a snapshot
+  - optionally refreshes Siri Launchpad icon registration
 
 Core steps use normal sudo prompting. The Siri Location Services icon runtime
 fix is applied once now and then re-applied by the existing boot-time
@@ -106,6 +108,13 @@ while [[ $# -gt 0 ]]; do
       ;;
     --fix-siri-icon)
       DO_ICON_FIX=1
+      DO_ICON_ONLY=1
+      DO_LOAD_KEXT=0
+      DO_INSTALL_LAUNCHDAEMON=0
+      DO_ELIGIBILITY=0
+      DO_SAE=0
+      DO_LOCATION_IP_FIX=0
+      DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
       ;;
     --verify-only)
       DO_VERIFY_ONLY=1
@@ -1325,60 +1334,69 @@ find_system_volume_device() {
 }
 
 patch_siri_launchpad_icon_source() {
-  section "Patch Siri Launchpad icon source"
+  section "Refresh Siri Launchpad icon registration"
   local backup_dir="$HOME/Documents/Codex/siri-launchpad-icon-backups/$(date +%Y%m%d-%H%M%S)"
   local sys_dev
 
-  if ! csrutil authenticated-root status 2>/dev/null | grep -qi 'disabled'; then
-    cat >&2 <<'MSG'
-Authenticated Root is enabled, so the sealed System volume cannot be changed.
-For the one-time Siri Launchpad icon source fix, boot Recovery and run:
+  mkdir -p "$backup_dir"
+  cp /System/Applications/Siri.app/Contents/Info.plist "$backup_dir/SystemApplications.Siri.Info.plist.live" 2>/dev/null || true
+  cp /System/Library/CoreServices/Siri.app/Contents/Info.plist "$backup_dir/CoreServices.Siri.Info.plist.live" 2>/dev/null || true
+
+  echo "-- Live Launchpad Siri registration source --"
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' /System/Applications/Siri.app/Contents/Info.plist 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' /System/Applications/Siri.app/Contents/Info.plist 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' /System/Applications/Siri.app/Contents/Info.plist 2>/dev/null || true
+
+  if ! /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' /System/Applications/Siri.app/Contents/Info.plist 2>/dev/null | grep -qx 'AppIcon'; then
+    if ! csrutil authenticated-root status 2>/dev/null | grep -qi 'disabled'; then
+      cat >&2 <<'MSG'
+The live /System/Applications/Siri.app is missing CFBundleIconName=AppIcon,
+but Authenticated Root is enabled so the sealed System volume cannot be fixed.
+
+Boot Recovery, run:
 
   csrutil authenticated-root disable
 
 Then boot macOS and rerun this script with --fix-siri-icon or --all.
 MSG
-    exit 1
+      exit 1
+    fi
+
+    sys_dev="$(find_system_volume_device)"
+    mkdir -p "$SIRI_ICON_MNT"
+    if ! mount | grep -q " on ${SIRI_ICON_MNT} "; then
+      run_root mount -t apfs -o nobrowse,rw "$sys_dev" "$SIRI_ICON_MNT"
+    fi
+
+    if [[ ! -f "$SIRI_ICON_INFO" ]]; then
+      echo "Missing Siri Info.plist at $SIRI_ICON_INFO" >&2
+      exit 1
+    fi
+
+    cp "$SIRI_ICON_INFO" "$backup_dir/Siri.Info.plist.snapshot.before"
+    echo "Restoring CFBundleIconName=AppIcon so IconServices uses the modern Assets.car icon stack..."
+    run_root /usr/libexec/PlistBuddy -c 'Set :CFBundleIconName AppIcon' "$SIRI_ICON_INFO" 2>/dev/null || \
+      run_root /usr/libexec/PlistBuddy -c 'Add :CFBundleIconName string AppIcon' "$SIRI_ICON_INFO"
+    run_root /usr/libexec/PlistBuddy -c 'Set :CFBundleIconFile AppIcon' "$SIRI_ICON_INFO" 2>/dev/null || \
+      run_root /usr/libexec/PlistBuddy -c 'Add :CFBundleIconFile string AppIcon' "$SIRI_ICON_INFO"
+    plutil -lint "$SIRI_ICON_INFO"
+    cp "$SIRI_ICON_INFO" "$backup_dir/Siri.Info.plist.snapshot.after"
+
+    echo "Creating new boot snapshot..."
+    run_root bless --mount "$SIRI_ICON_MNT" --create-snapshot
+    echo "Reboot is required for the modified system snapshot to become the live root."
+  else
+    echo "CFBundleIconName=AppIcon is already present; no sealed System snapshot edit is needed."
   fi
-
-  sys_dev="$(find_system_volume_device)"
-
-  mkdir -p "$SIRI_ICON_MNT"
-  if ! mount | grep -q " on ${SIRI_ICON_MNT} "; then
-    run_root mount -t apfs -o nobrowse,rw "$sys_dev" "$SIRI_ICON_MNT"
-  fi
-
-  if [[ ! -f "$SIRI_ICON_INFO" ]]; then
-    echo "Missing Siri Info.plist at $SIRI_ICON_INFO" >&2
-    exit 1
-  fi
-
-  mkdir -p "$backup_dir"
-  cp "$SIRI_ICON_INFO" "$backup_dir/Siri.Info.plist.before"
-
-  echo "-- Launchpad source before --"
-  /usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$SIRI_ICON_INFO" 2>/dev/null || true
-  /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$SIRI_ICON_INFO" 2>/dev/null || true
-
-  echo "Removing CFBundleIconName so Launchpad falls back to CFBundleIconFile/AppIcon.icns..."
-  run_root /usr/libexec/PlistBuddy -c 'Delete :CFBundleIconName' "$SIRI_ICON_INFO" 2>/dev/null || true
-  plutil -lint "$SIRI_ICON_INFO"
-  cp "$SIRI_ICON_INFO" "$backup_dir/Siri.Info.plist.after"
-
-  echo "-- Launchpad source after --"
-  /usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$SIRI_ICON_INFO" 2>/dev/null || true
-  /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$SIRI_ICON_INFO" 2>/dev/null || echo "(CFBundleIconName removed)"
-
-  echo "Creating new boot snapshot..."
-  run_root bless --mount "$SIRI_ICON_MNT" --create-snapshot
 
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /System/Applications/Siri.app || true
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /System/Library/CoreServices/Siri.app || true
   /usr/bin/mdimport /System/Applications/Siri.app || true
+  /usr/bin/mdimport /System/Library/CoreServices/Siri.app || true
   /usr/bin/qlmanage -r cache >/dev/null 2>&1 || true
   killall iconservicesagent IconServicesAgent Dock 2>/dev/null || true
 
   echo "Backup: $backup_dir"
-  echo "Reboot is required for the modified system snapshot to become the live root."
 }
 
 uninstall_run() {
@@ -1557,13 +1575,22 @@ if [[ "$DO_UNINSTALL" == "1" ]]; then
   exit 0
 fi
 
-if [[ "$DO_VERIFY_ONLY" == "0" && ( "$DO_LOAD_KEXT" == "1" || "$DO_INSTALL_LAUNCHDAEMON" == "1" || "$DO_ELIGIBILITY" == "1" || "$DO_LOCATION_IP_FIX" == "1" || "$DO_ICON_FIX" == "1" ) ]]; then
+if [[ "$DO_VERIFY_ONLY" == "0" && ( "$DO_LOAD_KEXT" == "1" || "$DO_INSTALL_LAUNCHDAEMON" == "1" || "$DO_ELIGIBILITY" == "1" || "$DO_LOCATION_IP_FIX" == "1" ) ]]; then
   section "sudo"
   echo "Requesting sudo once for kext/eligibility/system-snapshot operations..."
   sudo_keepalive_start
 fi
 
 print_sip_state
+
+if [[ "$DO_ICON_ONLY" == "1" ]]; then
+  patch_siri_launchpad_icon_source
+  final_hints
+  echo
+  echo "Done. Reopen Launchpad after Dock/IconServices restarts."
+  exit 0
+fi
+
 print_root_region_state
 
 if [[ "$DO_VERIFY_ONLY" == "1" ]]; then
@@ -1581,8 +1608,10 @@ fi
 [[ "$DO_LOCATION_IP_FIX" == "1" ]] && pin_geoservices_location_country_from_ip
 [[ "$DO_SIRI_LOCATION_ICON_RUNTIME_FIX" == "1" ]] && install_siri_location_icon_runtime_fix
 
-refresh_ai_clients
-restore_siri_menu_bar_extra
+if [[ "$DO_ICON_ONLY" == "0" ]]; then
+  refresh_ai_clients
+  restore_siri_menu_bar_extra
+fi
 [[ "$DO_ICON_FIX" == "1" ]] && patch_siri_launchpad_icon_source
 
 section "Final verification snapshot"
