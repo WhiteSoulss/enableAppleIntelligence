@@ -11,7 +11,6 @@ Photos Clean Up / 照片擦除
 Siri SAE 模式
 ```
 
-Siri 的應用名稱仍然是 `Siri`。新版 Apple Intelligence 行為是 Siri 圖標變成新樣式，不是把 App 直接改名成 Apple Intelligence。
 
 ## 原理
 
