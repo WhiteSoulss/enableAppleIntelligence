@@ -683,6 +683,9 @@ apply_siri_location_icon_fix() {
       -o 'process detach' -o quit >> "$lldb_log" 2>&1 || true
   fi
 
+  /bin/sleep 2
+  clean_siri_location_rows_for_icon_fix || true
+
   /usr/bin/tail -40 "$lldb_log" 2>/dev/null || true
   /usr/bin/killall "System Settings" SecurityPrivacyExtension cfprefsd iconservicesagent IconServicesAgent 2>/dev/null || true
 }
@@ -1265,6 +1268,8 @@ apply_siri_location_icon_runtime_fix_now() {
       -o 'process detach' -o quit > "$lldb_log" 2>&1 || true
     tail -25 "$lldb_log" || true
   fi
+  sleep 2
+  clean_siri_location_rows_now || true
 
   echo
   echo "== 4. Restart UI and trigger new Siri registration =="
