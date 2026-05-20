@@ -9,6 +9,7 @@ DO_INSTALL_LAUNCHDAEMON=1
 DO_LOAD_KEXT=1
 DO_ELIGIBILITY=1
 DO_SAE=1
+DO_LOCATION_CN_FIX=1
 DO_VERIFY_ONLY=0
 
 KEXT="/Library/Extensions/CodexRegionSpoof.kext"
@@ -17,6 +18,8 @@ LOCAL_KEXT_BIN="$LOCAL_KEXT/Contents/MacOS/CodexRegionSpoof"
 LOCAL_KEXT_BIN_B64="$LOCAL_KEXT/Contents/MacOS/CodexRegionSpoof.b64"
 LOADER_SCRIPT="/Library/Scripts/Codex/load-region-spoof.sh"
 LOADER_PLIST="/Library/LaunchDaemons/local.codex.region-spoof-loader.plist"
+GEOSERVICES_DIR="/var/db/locationd/Library/Caches/GeoServices"
+GEOSERVICES_DIRECT_STORE="${GEOSERVICES_DIR}/DirectReadConfigStore.plist"
 
 ELIGIBILITYD_PLIST="/private/var/db/eligibilityd/eligibility.plist"
 OS_ELIGIBILITY_PLIST="/private/var/db/os_eligibility/eligibility.plist"
@@ -60,6 +63,7 @@ Options:
   --skip-launchdaemon   Do not install/update the boot-time kext loader.
   --skip-eligibility    Do not patch eligibility plists.
   --skip-sae            Do not force Siri SAE orchestration preference.
+  --skip-location-cn    Do not pin GeoServices location country cache to CN.
   -h, --help            Show this help.
 
 Recovery prerequisites:
@@ -71,10 +75,11 @@ Recovery prerequisites:
 
 What this single script does:
   - verifies SIP / SSV / root IORegistry region state
-  - installs/loads the kernel-side region-info / country-of-origin spoof kext
+  - installs/loads the kernel-side region-info spoof kext
   - installs a boot-time LaunchDaemon to reload that kext
   - patches Apple Intelligence eligibility domains to answer_t = 4
   - forces Siri SAE orchestration mode
+  - keeps GeoServices location country on CN so Maps/Weather can locate in China
   - refreshes affected availability clients
   - optionally patches the Siri Launchpad icon source and blesses a snapshot
 
@@ -96,6 +101,7 @@ while [[ $# -gt 0 ]]; do
       DO_INSTALL_LAUNCHDAEMON=0
       DO_ELIGIBILITY=0
       DO_SAE=0
+      DO_LOCATION_CN_FIX=0
       DO_ICON_FIX=0
       ;;
     --skip-kext)
@@ -109,6 +115,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-sae)
       DO_SAE=0
+      ;;
+    --skip-location-cn)
+      DO_LOCATION_CN_FIX=0
       ;;
     -h|--help)
       usage
@@ -283,6 +292,29 @@ KEXT="/Library/Extensions/CodexRegionSpoof.kext"
 
   echo "restarting AI availability daemons"
   /usr/bin/killall eligibilityd generativeexperiencesd modelcatalogd 2>/dev/null || true
+
+  echo "pinning GeoServices location country cache to CN for mainland Maps location"
+  /bin/mkdir -p /var/db/locationd/Library/Caches/GeoServices
+  /bin/cat > /var/db/locationd/Library/Caches/GeoServices/DirectReadConfigStore.plist <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>DeviceCountryCodeSourced</key>
+  <dict>
+    <key>cc</key>
+    <string>CN</string>
+    <key>metadata</key>
+    <dict/>
+    <key>source</key>
+    <integer>262</integer>
+  </dict>
+</dict>
+</plist>
+PLIST
+  /usr/sbin/chown _locationd:_locationd /var/db/locationd/Library/Caches/GeoServices/DirectReadConfigStore.plist 2>/dev/null || true
+  /bin/chmod 0644 /var/db/locationd/Library/Caches/GeoServices/DirectReadConfigStore.plist 2>/dev/null || true
+  /usr/bin/killall locationd geod routined 2>/dev/null || true
 } >> "$LOG" 2>&1
 
 exit 0
@@ -511,6 +543,47 @@ force_siri_sae_orchestration_mode() {
   defaults read "$SIRI_DOMAIN" "$SIRI_KEY" 2>/dev/null || true
 }
 
+pin_geoservices_location_country_cn() {
+  section "Pin GeoServices location country to CN"
+  local backup_dir="/private/var/db/locationd_cache_backup/geo-cn-$(date +%Y%m%d-%H%M%S)"
+
+  run_root mkdir -p "$GEOSERVICES_DIR" "$backup_dir"
+  if [[ -e "$GEOSERVICES_DIRECT_STORE" ]]; then
+    run_root cp -p "$GEOSERVICES_DIRECT_STORE" "$backup_dir/DirectReadConfigStore.plist.before"
+    echo "Backup: $backup_dir/DirectReadConfigStore.plist.before"
+  fi
+
+  local tmp_store
+  tmp_store="$(mktemp)"
+  cat > "$tmp_store" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>DeviceCountryCodeSourced</key>
+  <dict>
+    <key>cc</key>
+    <string>CN</string>
+    <key>metadata</key>
+    <dict/>
+    <key>source</key>
+    <integer>262</integer>
+  </dict>
+</dict>
+</plist>
+EOF
+  run_root install -o _locationd -g _locationd -m 0644 "$tmp_store" "$GEOSERVICES_DIRECT_STORE"
+  rm -f "$tmp_store"
+
+  echo "-- GeoServices DirectReadConfigStore --"
+  run_root plutil -p "$GEOSERVICES_DIRECT_STORE" 2>/dev/null || true
+
+  killall Maps Weather 2>/dev/null || true
+  killall CoreLocationAgent 2>/dev/null || true
+  run_root killall locationd geod routined 2>/dev/null || true
+  echo "Pinned location country cache to CN. Reopen Maps/Weather and test current location."
+}
+
 restore_siri_menu_bar_extra() {
   section "Restore Siri menu bar extra"
   defaults write com.apple.systemuiserver menuExtras -array /System/Library/CoreServices/Siri.bundle
@@ -581,7 +654,7 @@ section "Preflight"
 echo "Workspace: $ROOT_DIR"
 echo "macOS: $(sw_vers -productVersion 2>/dev/null || true)"
 
-if [[ "$DO_VERIFY_ONLY" == "0" && ( "$DO_LOAD_KEXT" == "1" || "$DO_INSTALL_LAUNCHDAEMON" == "1" || "$DO_ELIGIBILITY" == "1" || "$DO_ICON_FIX" == "1" ) ]]; then
+if [[ "$DO_VERIFY_ONLY" == "0" && ( "$DO_LOAD_KEXT" == "1" || "$DO_INSTALL_LAUNCHDAEMON" == "1" || "$DO_ELIGIBILITY" == "1" || "$DO_LOCATION_CN_FIX" == "1" || "$DO_ICON_FIX" == "1" ) ]]; then
   section "sudo"
   echo "Requesting sudo once for kext/eligibility/system-snapshot operations..."
   sudo_keepalive_start
@@ -602,6 +675,7 @@ fi
 [[ "$DO_INSTALL_LAUNCHDAEMON" == "1" ]] && install_region_spoof_launchdaemon
 [[ "$DO_ELIGIBILITY" == "1" ]] && patch_eligibility_domains
 [[ "$DO_SAE" == "1" ]] && force_siri_sae_orchestration_mode
+[[ "$DO_LOCATION_CN_FIX" == "1" ]] && pin_geoservices_location_country_cn
 
 refresh_ai_clients
 restore_siri_menu_bar_extra

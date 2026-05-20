@@ -49,6 +49,15 @@ RegionCode = LL
 
 然後再配合 eligibility plist 和 Siri SAE 狀態修正，讓 Apple Intelligence 的各條鏈路一起通過。
 
+定位是另一條鏈。Apple Intelligence 需要 root identity 顯示為 `LL/A + USA`，但中國大陸的 Apple Maps / Weather 定位通常仍需要 `locationd` / GeoServices 使用中國定位 provider。因此一鍵腳本會額外固定：
+
+```text
+/var/db/locationd/Library/Caches/GeoServices/DirectReadConfigStore.plist
+DeviceCountryCodeSourced.cc = CN
+```
+
+這不會把 IORegistry 改回中國 SKU，只是讓地圖定位繼續走適合中國網絡環境的 GeoServices 配置。
+
 ## 文件
 
 ```text
@@ -204,12 +213,15 @@ bless --create-snapshot
 
 5. 修改 Apple Intelligence 相關 eligibility domains。
 6. 將 Siri SAE orchestration mode 設成 `4`。
-7. 重啟相關服務：
+7. 將 GeoServices 定位國家 cache 固定為 `CN`，避免中國大陸環境下 Maps 定位按鈕不可用。
+8. 重啟相關服務：
 
    ```text
    eligibilityd
    generativeexperiencesd
    modelcatalogd
+   locationd
+   geod
    System Settings
    SiriPreferenceExtension
    SiriNCService
@@ -218,9 +230,9 @@ bless --create-snapshot
    cfprefsd
    ```
 
-8. 發送 availability / eligibility notification。
-9. 恢復 Siri menu bar extra。
-10. 如果使用 `--all`，修正 Siri Launchpad 圖標來源並建立新 snapshot。
+9. 發送 availability / eligibility notification。
+10. 恢復 Siri menu bar extra。
+11. 如果使用 `--all`，修正 Siri Launchpad 圖標來源並建立新 snapshot。
 
 ## Eligibility 修改內容
 
@@ -379,7 +391,37 @@ com.apple.systemuiserver menuExtras = /System/Library/CoreServices/Siri.bundle
 
 然後重啟。這一步改的是 sealed system snapshot，沒有重啟前 live root 還是舊 snapshot。
 
-### 5. 比較高安全狀態怎麼設置
+### 5. Maps 定位按鈕沒反應
+
+如果 Apple Intelligence 已經可用，但 Maps 裡點定位沒有反應，先看：
+
+```text
+View -> Go to Current Location
+```
+
+如果這個項目是灰色，通常不是 Maps 壞了，而是 `locationd` / GeoServices 的定位國家配置不適合當前中國網絡環境。一鍵腳本默認會把：
+
+```text
+DeviceCountryCodeSourced.cc = CN
+```
+
+寫入 GeoServices cache，然後重啟：
+
+```text
+locationd
+geod
+routined
+Maps
+Weather
+```
+
+如果你不在中國大陸，或者不想改定位國家 cache，可以執行：
+
+```bash
+./enable_apple_intelligence_oneclick.sh --skip-location-cn
+```
+
+### 6. 比較高安全狀態怎麼設置
 
 在已經成功啟用 Apple Intelligence、並且 `country-of-origin = USA` / `region-info = LL/A` 後，可以把安全狀態收緊到比較高的狀態。
 
