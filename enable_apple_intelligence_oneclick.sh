@@ -10,6 +10,7 @@ DO_LOAD_KEXT=1
 DO_ELIGIBILITY=1
 DO_SAE=1
 DO_LOCATION_IP_FIX=1
+DO_SIRI_LOCATION_ICON_RUNTIME_FIX=1
 DO_VERIFY_ONLY=0
 
 KEXT="/Library/Extensions/CodexRegionSpoof.kext"
@@ -18,6 +19,8 @@ LOCAL_KEXT_BIN="$LOCAL_KEXT/Contents/MacOS/CodexRegionSpoof"
 LOCAL_KEXT_BIN_B64="$LOCAL_KEXT/Contents/MacOS/CodexRegionSpoof.b64"
 LOADER_SCRIPT="/Library/Scripts/Codex/load-region-spoof.sh"
 LOADER_PLIST="/Library/LaunchDaemons/local.codex.region-spoof-loader.plist"
+SIRI_LOCATION_FIX_DIR="/Library/Scripts/Codex/SiriLocationIconFix"
+SIRI_LOCATION_FIX_AGENT="$HOME/Library/LaunchAgents/local.codex.siri-location-icon-fix.plist"
 GEOSERVICES_DIR="/var/db/locationd/Library/Caches/GeoServices"
 GEOSERVICES_DIRECT_STORE="${GEOSERVICES_DIR}/DirectReadConfigStore.plist"
 
@@ -28,14 +31,9 @@ ELIGIBILITY_BACKUP_BASE="/private/var/db/eligibilityd_source_backup"
 SIRI_DOMAIN="com.apple.assistant.backedup"
 SIRI_KEY="SiriAvailability"
 SIRI_PREF="$HOME/Library/Preferences/${SIRI_DOMAIN}.plist"
-
 SIRI_ICON_MNT="/private/tmp/codex_system_rw"
 SIRI_ICON_DEVICE="/dev/disk3s5"
 SIRI_ICON_INFO="${SIRI_ICON_MNT}/System/Applications/Siri.app/Contents/Info.plist"
-SIRI_LOCATION_ICON_TARGET="${SIRI_ICON_MNT}/System/Library/PrivateFrameworks/AssistantServices.framework/Versions/A/Resources/siri-osx.icns"
-SIRI_ICON_WORK_DIR="/private/tmp/codex_siri_location_icon"
-SIRI_ICON_RENDER_TOOL="${SIRI_ICON_WORK_DIR}/render_asset_image"
-SIRI_LOCATION_ICON_SOURCE="${SIRI_ICON_WORK_DIR}/SiriIconSAE.icns"
 
 ELIGIBILITYD_DOMAINS=(
   OS_ELIGIBILITY_DOMAIN_GREYMATTER
@@ -59,8 +57,8 @@ Usage:
   ./enable_apple_intelligence_oneclick.sh [options]
 
 Options:
-  --all                 Run core enable steps and Siri icon snapshot fixes.
-  --fix-siri-icon       Patch Siri icon sources for Launchpad and Location Services.
+  --all                 Run core enable steps and the Siri Launchpad icon snapshot fix.
+  --fix-siri-icon       Patch Siri Launchpad icon source only.
                         Requires authenticated-root disabled and a reboot.
   --verify-only         Only print current state; do not change anything.
   --skip-kext           Do not load CodexRegionSpoof.kext this run.
@@ -68,6 +66,8 @@ Options:
   --skip-eligibility    Do not patch eligibility plists.
   --skip-sae            Do not force Siri SAE orchestration preference.
   --skip-location-ip    Do not set GeoServices location country from public IP.
+  --skip-siri-location-icon
+                        Do not integrate the Location Services Siri icon runtime fix.
   -h, --help            Show this help.
 
 Recovery prerequisites:
@@ -84,10 +84,13 @@ What this single script does:
   - patches Apple Intelligence eligibility domains to answer_t = 4
   - forces Siri SAE orchestration mode
   - sets GeoServices location country from the current public IP exit country
+  - integrates the Location Services Siri icon fix into load-region-spoof.sh
   - refreshes affected availability clients
-  - optionally patches Siri Launchpad + Location Services icon sources and blesses a snapshot
+  - optionally patches Siri Launchpad icon source and blesses a snapshot
 
-No sudo password is stored. sudo prompts normally.
+Core steps use normal sudo prompting. The Siri Location Services icon runtime
+fix is applied once now and then re-applied by the existing boot-time
+load-region-spoof.sh flow after reboot.
 EOF
 }
 
@@ -123,6 +126,9 @@ while [[ $# -gt 0 ]]; do
     --skip-location-ip|--skip-location-cn)
       DO_LOCATION_IP_FIX=0
       ;;
+    --skip-siri-location-icon)
+      DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
+      ;;
     -h|--help)
       usage
       exit 0
@@ -142,9 +148,9 @@ section() {
 }
 
 require_path() {
-  local path="$1"
-  if [[ ! -e "$path" ]]; then
-    echo "Missing required path: $path" >&2
+  local required_path="$1"
+  if [[ ! -e "$required_path" ]]; then
+    echo "Missing required path: $required_path" >&2
     exit 1
   fi
 }
@@ -181,7 +187,11 @@ ensure_region_spoof_kext_installed() {
 }
 
 sudo_keepalive_start() {
-  sudo -v
+  if [[ -n "${SUDO_PASSWORD:-}" ]]; then
+    printf '%s\n' "$SUDO_PASSWORD" | sudo -S -v
+  else
+    sudo -v
+  fi
   while true; do
     sudo -n true 2>/dev/null || exit
     sleep 60
@@ -193,6 +203,8 @@ sudo_keepalive_start() {
 run_root() {
   if [[ "$(id -u)" == "0" ]]; then
     "$@"
+  elif [[ -n "${SUDO_PASSWORD:-}" ]]; then
+    printf '%s\n' "$SUDO_PASSWORD" | sudo -S "$@"
   else
     sudo "$@"
   fi
@@ -262,9 +274,29 @@ load_region_spoof_kext() {
     grep -Ei '"region-info"|"country-of-origin"|"model"|"model-number"|"regulatory-model-number"' || true
 }
 
+install_siri_location_icon_payload() {
+  local required=(
+    "$ROOT_DIR/patch_assistant_effective_siri_location_lldb.py"
+    "$ROOT_DIR/patch_locationd_skip_assistantd_association_lldb.py"
+  )
+
+  local required_file
+  for required_file in "${required[@]}"; do
+    if [[ ! -f "$required_file" ]]; then
+      echo "Missing required Siri Location icon fix file: $required_file" >&2
+      exit 1
+    fi
+  done
+
+  run_root mkdir -p "$SIRI_LOCATION_FIX_DIR"
+  run_root install -o root -g wheel -m 644 "$ROOT_DIR/patch_assistant_effective_siri_location_lldb.py" "$SIRI_LOCATION_FIX_DIR/patch_assistant_effective_siri_location_lldb.py"
+  run_root install -o root -g wheel -m 644 "$ROOT_DIR/patch_locationd_skip_assistantd_association_lldb.py" "$SIRI_LOCATION_FIX_DIR/patch_locationd_skip_assistantd_association_lldb.py"
+}
+
 install_region_spoof_launchdaemon() {
   section "Install boot-time kext loader"
   ensure_region_spoof_kext_installed
+  install_siri_location_icon_payload
 
   run_root mkdir -p /Library/Scripts/Codex
 
@@ -276,6 +308,142 @@ set -u
 
 LOG="/var/log/codex-region-spoof-loader.log"
 KEXT="/Library/Extensions/CodexRegionSpoof.kext"
+SIRI_FIX_DIR="/Library/Scripts/Codex/SiriLocationIconFix"
+SIRI_ASSISTANTD_PATCH="$SIRI_FIX_DIR/patch_assistant_effective_siri_location_lldb.py"
+SIRI_LOCATIOND_PATCH="$SIRI_FIX_DIR/patch_locationd_skip_assistantd_association_lldb.py"
+ASSISTANTD_PLIST="/System/Library/LaunchAgents/com.apple.assistantd.plist"
+CLIENTS_PLIST="/var/db/locationd/clients.plist"
+
+console_user() {
+  /usr/bin/stat -f '%Su' /dev/console 2>/dev/null || true
+}
+
+console_uid() {
+  local user="$1"
+  /usr/bin/id -u "$user" 2>/dev/null || true
+}
+
+clean_siri_location_rows_for_icon_fix() {
+  if [[ ! -f "$CLIENTS_PLIST" ]]; then
+    echo "Location Services clients plist not present yet: $CLIENTS_PLIST"
+    return 0
+  fi
+
+  /usr/bin/python3 - "$CLIENTS_PLIST" <<'PY'
+import os
+import plistlib
+import shutil
+import sys
+import time
+
+plist_path = sys.argv[1]
+with open(plist_path, "rb") as f:
+    data = plistlib.load(f)
+
+def is_siri_location_row(key, value):
+    text = f"{key}\n{value}".lower()
+    return (
+        "assistantd" in text
+        or "assistantservices.framework" in text
+        or "com.apple.siri" in text
+        or "coreservices/siri.app" in text
+    )
+
+remove_keys = [key for key, value in data.items() if is_siri_location_row(key, value)]
+if not remove_keys:
+    print("removed=0")
+    raise SystemExit(0)
+
+backup = f"{plist_path}.backup-codex-siri-icon-{time.strftime('%Y%m%d-%H%M%S')}"
+shutil.copy2(plist_path, backup)
+for key in remove_keys:
+    data.pop(key, None)
+
+tmp = f"{plist_path}.codex-tmp"
+with open(tmp, "wb") as f:
+    plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
+
+stat = os.stat(plist_path)
+os.chown(tmp, stat.st_uid, stat.st_gid)
+os.chmod(tmp, stat.st_mode & 0o7777)
+os.replace(tmp, plist_path)
+
+print(f"backup={backup}")
+print(f"removed={len(remove_keys)}")
+for key in remove_keys:
+    print(f"  {key}")
+PY
+}
+
+apply_siri_location_icon_fix() {
+  if [[ ! -f "$SIRI_ASSISTANTD_PATCH" || ! -f "$SIRI_LOCATIOND_PATCH" ]]; then
+    echo "Siri Location icon payload missing under $SIRI_FIX_DIR; skipping"
+    return 0
+  fi
+
+  local user=""
+  local uid=""
+  for _ in {1..150}; do
+    user="$(console_user)"
+    if [[ -n "$user" && "$user" != "root" && "$user" != "loginwindow" ]]; then
+      uid="$(console_uid "$user")"
+      [[ -n "$uid" ]] && break
+    fi
+    /bin/sleep 2
+  done
+
+  if [[ -z "$uid" ]]; then
+    echo "No logged-in console user found; skipping Siri Location icon runtime fix"
+    return 0
+  fi
+
+  echo "applying Siri Location icon runtime fix for $user uid=$uid"
+  /usr/bin/killall lldb debugserver 2>/dev/null || true
+  /bin/launchctl bootout "gui/$uid/com.apple.assistantd" 2>/dev/null || true
+  /usr/bin/killall assistantd 2>/dev/null || true
+  clean_siri_location_rows_for_icon_fix || true
+
+  /usr/bin/killall locationd 2>/dev/null || true
+  /bin/sleep 3
+
+  local locationd_pid
+  locationd_pid="$(/usr/bin/pgrep -x locationd | /usr/bin/head -1 || true)"
+  if [[ -n "$locationd_pid" ]]; then
+    /usr/bin/lldb --batch -p "$locationd_pid" \
+      -o "command script import \"$SIRI_LOCATIOND_PATCH\"" \
+      -o 'process detach' -o quit || true
+  else
+    echo "locationd did not restart before patch attempt"
+  fi
+
+  local lldb_cmds="/tmp/codex_loader_assistantd_location_icon.lldb"
+  local lldb_log="/tmp/codex_loader_assistantd_location_icon.log"
+  /bin/cat > "$lldb_cmds" <<EOF2
+process attach -w -n assistantd
+command script import "$SIRI_ASSISTANTD_PATCH"
+expr -l objc++ -O -- (id)AFEffectiveSiriBundleForLocation()
+expr -l objc++ -O -- (id)AFEffectiveSiriBundlePathForLocation()
+process continue
+EOF2
+
+  /usr/bin/pkill -f 'codex_loader_assistantd_location_icon|lldb.*assistantd' 2>/dev/null || true
+  /bin/rm -f "$lldb_log" 2>/dev/null || true
+  (/usr/bin/lldb -s "$lldb_cmds" > "$lldb_log" 2>&1) &
+  /bin/sleep 1
+
+  /bin/launchctl bootstrap "gui/$uid" "$ASSISTANTD_PLIST" 2>/dev/null || true
+  /bin/launchctl kickstart -k "gui/$uid/com.apple.assistantd" 2>/dev/null || true
+
+  for _ in {1..30}; do
+    if /usr/bin/grep -q "/System/Library/CoreServices/Siri.app" "$lldb_log" 2>/dev/null; then
+      break
+    fi
+    /bin/sleep 1
+  done
+
+  /usr/bin/tail -40 "$lldb_log" 2>/dev/null || true
+  /usr/bin/killall "System Settings" SecurityPrivacyExtension cfprefsd iconservicesagent IconServicesAgent 2>/dev/null || true
+}
 
 {
   echo "==== $(date) ===="
@@ -344,6 +512,7 @@ PY
   /usr/sbin/chown _locationd:_locationd /var/db/locationd/Library/Caches/GeoServices/DirectReadConfigStore.plist 2>/dev/null || true
   /bin/chmod 0644 /var/db/locationd/Library/Caches/GeoServices/DirectReadConfigStore.plist 2>/dev/null || true
   /usr/bin/killall locationd geod routined 2>/dev/null || true
+  apply_siri_location_icon_fix
 } >> "$LOG" 2>&1
 
 exit 0
@@ -654,6 +823,169 @@ refresh_ai_clients() {
   sleep 2
 }
 
+clean_siri_location_rows_now() {
+  local cleaner="/tmp/codex_fix_siri_location_clean_clients.py"
+  local clients_plist="/var/db/locationd/clients.plist"
+
+  if [[ ! -f "$clients_plist" ]]; then
+    echo "Location Services clients plist not present yet: $clients_plist"
+    return 0
+  fi
+
+  cat > "$cleaner" <<'PY'
+import os
+import plistlib
+import shutil
+import sys
+import time
+
+plist_path = sys.argv[1]
+
+with open(plist_path, "rb") as f:
+    data = plistlib.load(f)
+
+def is_siri_location_row(key, value):
+    text = f"{key}\n{value}".lower()
+    return (
+        "assistantd" in text
+        or "assistantservices.framework" in text
+        or "com.apple.siri" in text
+        or "coreservices/siri.app" in text
+    )
+
+remove_keys = [key for key, value in data.items() if is_siri_location_row(key, value)]
+backup = f"{plist_path}.backup-codex-siri-icon-{time.strftime('%Y%m%d-%H%M%S')}"
+shutil.copy2(plist_path, backup)
+
+for key in remove_keys:
+    data.pop(key, None)
+
+tmp = f"{plist_path}.codex-tmp"
+with open(tmp, "wb") as f:
+    plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
+
+stat = os.stat(plist_path)
+os.chown(tmp, stat.st_uid, stat.st_gid)
+os.chmod(tmp, stat.st_mode & 0o7777)
+os.replace(tmp, plist_path)
+
+print(f"backup={backup}")
+print(f"removed={len(remove_keys)}")
+for key in remove_keys:
+    print(f"  {key}")
+PY
+
+  run_root /usr/bin/python3 "$cleaner" "$clients_plist"
+  rm -f "$cleaner"
+}
+
+apply_siri_location_icon_runtime_fix_now() {
+  section "Apply Location Services Siri icon runtime fix now"
+
+  local assistant_patch="$ROOT_DIR/patch_assistant_effective_siri_location_lldb.py"
+  local locationd_patch="$ROOT_DIR/patch_locationd_skip_assistantd_association_lldb.py"
+  local assistantd_label="gui/$(id -u)/com.apple.assistantd"
+  local assistantd_plist="/System/Library/LaunchAgents/com.apple.assistantd.plist"
+  local lldb_cmds="/tmp/codex_fix_siri_location_icon_assistantd.lldb"
+  local lldb_log="/tmp/codex_fix_siri_location_icon_assistantd.log"
+  local locationd_lldb_log="/tmp/codex_fix_siri_location_icon_locationd.log"
+  local clients_dump="/tmp/codex_fix_siri_location_clients.txt"
+  local locationd_pid
+  local spe_pid
+
+  if [[ ! -f "$assistant_patch" || ! -f "$locationd_patch" ]]; then
+    echo "Missing Location Services Siri icon patch scripts; skipping immediate runtime fix."
+    return 0
+  fi
+
+  echo "== 1. Stop assistantd and remove stale Siri/assistantd Location Services rows =="
+  run_root /usr/bin/killall lldb debugserver 2>/dev/null || true
+  launchctl bootout "$assistantd_label" 2>/dev/null || true
+  killall assistantd 2>/dev/null || true
+  clean_siri_location_rows_now || true
+
+  echo
+  echo "== 2. Restart and patch locationd so it does not associate back to com.apple.assistantd =="
+  run_root /usr/bin/killall locationd 2>/dev/null || true
+  sleep 3
+
+  locationd_pid="$(pgrep -x locationd | head -1 || true)"
+  if [[ -z "$locationd_pid" ]]; then
+    echo "locationd did not restart; skipping immediate locationd patch."
+  else
+    rm -f "$locationd_lldb_log"
+    run_root /usr/bin/lldb --batch -p "$locationd_pid" \
+      -o "command script import \"$locationd_patch\"" \
+      -o 'process detach' -o quit > "$locationd_lldb_log" 2>&1 || true
+    tail -30 "$locationd_lldb_log" || true
+  fi
+
+  echo
+  echo "== 3. Patch assistantd effective Siri location bundle early =="
+  pkill -f "codex_fix_siri_location_icon_assistantd|lldb.*assistantd" 2>/dev/null || true
+
+  cat > "$lldb_cmds" <<EOF
+process attach -w -n assistantd
+command script import "$assistant_patch"
+expr -l objc++ -O -- (id)AFEffectiveSiriBundleForLocation()
+expr -l objc++ -O -- (id)AFEffectiveSiriBundlePathForLocation()
+process continue
+EOF
+
+  rm -f "$lldb_log"
+  (/usr/bin/lldb -s "$lldb_cmds" > "$lldb_log" 2>&1) &
+  sleep 1
+
+  launchctl bootstrap "gui/$(id -u)" "$assistantd_plist" 2>/dev/null || true
+  launchctl kickstart -k "$assistantd_label" 2>/dev/null || true
+
+  for _ in {1..30}; do
+    if grep -q "/System/Library/CoreServices/Siri.app" "$lldb_log" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+  tail -35 "$lldb_log" || true
+
+  echo
+  echo "== 4. Restart UI and trigger new Siri registration =="
+  killall "System Settings" SecurityPrivacyExtension cfprefsd iconservicesagent IconServicesAgent 2>/dev/null || true
+  sleep 2
+  open -a Siri 2>/dev/null || true
+
+  echo
+  echo "== 5. Verify CoreLocation identities =="
+  spe_pid="$(pgrep -f 'SecurityPrivacyExtension.appex.*SecurityPrivacyExtension' | head -1 || true)"
+  if [[ -n "$spe_pid" ]]; then
+    /usr/bin/lldb --batch -p "$spe_pid" \
+      -o 'expr -l objc++ -O -- [NSClassFromString(@"CLLocationManager") userLocationClientsWithInfo]' \
+      -o 'process detach' -o quit > "$clients_dump" 2>&1 || true
+    grep -Ei 'AssistantServices.framework|CoreServices/Siri.app|assistantd|assistant_service|com.apple.Siri' "$clients_dump" || true
+    echo "CoreLocation dump: $clients_dump"
+  else
+    echo "SecurityPrivacyExtension is not running; open Location Services to visually verify."
+  fi
+}
+
+install_siri_location_icon_runtime_fix() {
+  section "Integrate Location Services Siri icon runtime fix"
+
+  install_siri_location_icon_payload
+
+  if [[ -f "$SIRI_LOCATION_FIX_AGENT" ]]; then
+    launchctl bootout "gui/$(id -u)" "$SIRI_LOCATION_FIX_AGENT" 2>/dev/null || true
+    rm -f "$SIRI_LOCATION_FIX_AGENT"
+    echo "Removed old standalone LaunchAgent: $SIRI_LOCATION_FIX_AGENT"
+  fi
+
+  run_root rm -f /Library/Scripts/Codex/SiriLocationIconFix/run-siri-location-icon-fix.sh 2>/dev/null || true
+  run_root rm -f /Library/Scripts/Codex/SiriLocationIconFix/fix_siri_location_icon_oneclick.sh 2>/dev/null || true
+
+  apply_siri_location_icon_runtime_fix_now || true
+
+  echo "Siri Location icon fix payload is now used by: $LOADER_SCRIPT"
+}
+
 find_system_volume_device() {
   local root_dev sys_dev
   root_dev="$(mount | awk '$3 == "/" {print $1; exit}')"
@@ -668,40 +1000,15 @@ find_system_volume_device() {
   echo "$sys_dev"
 }
 
-build_siri_sae_icns() {
-  section "Build SiriIconSAE icns from SiriUI assets"
-  rm -rf "$SIRI_ICON_WORK_DIR"
-  mkdir -p "$SIRI_ICON_WORK_DIR/SiriIconSAE.iconset"
-
-  clang -fobjc-arc -framework AppKit "$ROOT_DIR/tools/render_asset_image.m" -o "$SIRI_ICON_RENDER_TOOL"
-
-  "$SIRI_ICON_RENDER_TOOL" /System/Library/PrivateFrameworks/SiriUI.framework SiriIconSAE "$SIRI_ICON_WORK_DIR/SiriIconSAE.iconset/icon_16x16.png" 16 >/dev/null
-  "$SIRI_ICON_RENDER_TOOL" /System/Library/PrivateFrameworks/SiriUI.framework SiriIconSAE "$SIRI_ICON_WORK_DIR/SiriIconSAE.iconset/icon_16x16@2x.png" 32 >/dev/null
-  "$SIRI_ICON_RENDER_TOOL" /System/Library/PrivateFrameworks/SiriUI.framework SiriIconSAE "$SIRI_ICON_WORK_DIR/SiriIconSAE.iconset/icon_32x32.png" 32 >/dev/null
-  "$SIRI_ICON_RENDER_TOOL" /System/Library/PrivateFrameworks/SiriUI.framework SiriIconSAE "$SIRI_ICON_WORK_DIR/SiriIconSAE.iconset/icon_32x32@2x.png" 64 >/dev/null
-  "$SIRI_ICON_RENDER_TOOL" /System/Library/PrivateFrameworks/SiriUI.framework SiriIconSAE "$SIRI_ICON_WORK_DIR/SiriIconSAE.iconset/icon_128x128.png" 128 >/dev/null
-  "$SIRI_ICON_RENDER_TOOL" /System/Library/PrivateFrameworks/SiriUI.framework SiriIconSAE "$SIRI_ICON_WORK_DIR/SiriIconSAE.iconset/icon_128x128@2x.png" 256 >/dev/null
-  "$SIRI_ICON_RENDER_TOOL" /System/Library/PrivateFrameworks/SiriUI.framework SiriIconSAE "$SIRI_ICON_WORK_DIR/SiriIconSAE.iconset/icon_256x256.png" 256 >/dev/null
-  "$SIRI_ICON_RENDER_TOOL" /System/Library/PrivateFrameworks/SiriUI.framework SiriIconSAE "$SIRI_ICON_WORK_DIR/SiriIconSAE.iconset/icon_256x256@2x.png" 512 >/dev/null
-  "$SIRI_ICON_RENDER_TOOL" /System/Library/PrivateFrameworks/SiriUI.framework SiriIconSAE "$SIRI_ICON_WORK_DIR/SiriIconSAE.iconset/icon_512x512.png" 512 >/dev/null
-  "$SIRI_ICON_RENDER_TOOL" /System/Library/PrivateFrameworks/SiriUI.framework SiriIconSAE "$SIRI_ICON_WORK_DIR/SiriIconSAE.iconset/icon_512x512@2x.png" 1024 >/dev/null
-
-  iconutil -c icns "$SIRI_ICON_WORK_DIR/SiriIconSAE.iconset" -o "$SIRI_LOCATION_ICON_SOURCE"
-  if [[ ! -f "$SIRI_LOCATION_ICON_SOURCE" ]]; then
-    echo "Failed to build $SIRI_LOCATION_ICON_SOURCE" >&2
-    exit 1
-  fi
-}
-
-patch_siri_icon_sources() {
-  section "Patch Siri icon sources"
-  local backup_dir="$HOME/Documents/Codex/siri-icon-source-backups/$(date +%Y%m%d-%H%M%S)"
+patch_siri_launchpad_icon_source() {
+  section "Patch Siri Launchpad icon source"
+  local backup_dir="$HOME/Documents/Codex/siri-launchpad-icon-backups/$(date +%Y%m%d-%H%M%S)"
   local sys_dev
 
   if ! csrutil authenticated-root status 2>/dev/null | grep -qi 'disabled'; then
     cat >&2 <<'MSG'
 Authenticated Root is enabled, so the sealed System volume cannot be changed.
-For one-time persistent Siri icon fixes, boot Recovery and run:
+For the one-time Siri Launchpad icon source fix, boot Recovery and run:
 
   csrutil authenticated-root disable
 
@@ -709,8 +1016,6 @@ Then boot macOS and rerun this script with --fix-siri-icon or --all.
 MSG
     exit 1
   fi
-
-  build_siri_sae_icns
 
   sys_dev="$(find_system_volume_device)"
 
@@ -723,15 +1028,9 @@ MSG
     echo "Missing Siri Info.plist at $SIRI_ICON_INFO" >&2
     exit 1
   fi
-  if [[ ! -f "$SIRI_LOCATION_ICON_TARGET" ]]; then
-    echo "Missing AssistantServices Siri icon at $SIRI_LOCATION_ICON_TARGET" >&2
-    exit 1
-  fi
 
   mkdir -p "$backup_dir"
   cp "$SIRI_ICON_INFO" "$backup_dir/Siri.Info.plist.before"
-  cp "$SIRI_LOCATION_ICON_TARGET" "$backup_dir/AssistantServices.siri-osx.icns.before"
-  cp "$SIRI_LOCATION_ICON_SOURCE" "$backup_dir/SiriIconSAE.icns.source"
 
   echo "-- Launchpad source before --"
   /usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$SIRI_ICON_INFO" 2>/dev/null || true
@@ -746,20 +1045,13 @@ MSG
   /usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$SIRI_ICON_INFO" 2>/dev/null || true
   /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$SIRI_ICON_INFO" 2>/dev/null || echo "(CFBundleIconName removed)"
 
-  echo "-- Location Services source --"
-  run_root cp "$SIRI_LOCATION_ICON_SOURCE" "$SIRI_LOCATION_ICON_TARGET"
-  run_root chown root:wheel "$SIRI_LOCATION_ICON_TARGET"
-  run_root chmod 0644 "$SIRI_LOCATION_ICON_TARGET"
-  shasum -a 256 "$SIRI_LOCATION_ICON_TARGET" "$SIRI_LOCATION_ICON_SOURCE"
-
   echo "Creating new boot snapshot..."
   run_root bless --mount "$SIRI_ICON_MNT" --create-snapshot
 
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /System/Applications/Siri.app || true
-  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /System/Library/PrivateFrameworks/AssistantServices.framework || true
   /usr/bin/mdimport /System/Applications/Siri.app || true
   /usr/bin/qlmanage -r cache >/dev/null 2>&1 || true
-  killall iconservicesagent IconServicesAgent Dock 'System Settings' SecurityPrivacyExtension 2>/dev/null || true
+  killall iconservicesagent IconServicesAgent Dock 2>/dev/null || true
 
   echo "Backup: $backup_dir"
   echo "Reboot is required for the modified system snapshot to become the live root."
@@ -799,10 +1091,11 @@ fi
 [[ "$DO_ELIGIBILITY" == "1" ]] && patch_eligibility_domains
 [[ "$DO_SAE" == "1" ]] && force_siri_sae_orchestration_mode
 [[ "$DO_LOCATION_IP_FIX" == "1" ]] && pin_geoservices_location_country_from_ip
+[[ "$DO_SIRI_LOCATION_ICON_RUNTIME_FIX" == "1" ]] && install_siri_location_icon_runtime_fix
 
 refresh_ai_clients
 restore_siri_menu_bar_extra
-[[ "$DO_ICON_FIX" == "1" ]] && patch_siri_icon_sources
+[[ "$DO_ICON_FIX" == "1" ]] && patch_siri_launchpad_icon_source
 
 section "Final verification snapshot"
 print_root_region_state
@@ -814,5 +1107,5 @@ final_hints
 echo
 echo "Done. Reopen System Settings > Apple Intelligence & Siri and test Writing Tools, Image Playground, Photos Clean Up."
 if [[ "$DO_ICON_FIX" == "1" ]]; then
-  echo "Because --fix-siri-icon/--all was used, reboot before judging Siri icons in Launchpad and Location Services."
+  echo "Because --fix-siri-icon/--all was used, reboot before judging the Siri icon in Launchpad."
 fi

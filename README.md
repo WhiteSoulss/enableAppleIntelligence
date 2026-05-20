@@ -77,7 +77,14 @@ tools/CodexRegionSpoof.kext/Contents/MacOS/CodexRegionSpoof.b64
 tools/CodexRegionSpoof.kext/Contents/MacOS/CodexRegionSpoof
 ```
 
-`enable_apple_intelligence_oneclick.sh` 是自包含腳本，不再調用舊的子腳本。舊的 LLDB、Image Playground、eligibility 分析腳本只是研究過程備份，不是教程主流程。
+`enable_apple_intelligence_oneclick.sh` 是主入口。發布包內還包含少量必要 LLDB patch：
+
+```text
+patch_assistant_effective_siri_location_lldb.py
+patch_locationd_skip_assistantd_association_lldb.py
+```
+
+它們只用於 Location Services 裡 Siri 圖標的 runtime identity 修正；具體流程已合併在主腳本內，並會被主腳本安裝進既有的 `load-region-spoof.sh` 開機流程。舊的 LLDB、Image Playground、eligibility 分析腳本只是研究過程備份，不是教程主流程。
 
 ## 風險與前提
 
@@ -214,7 +221,8 @@ bless --create-snapshot
 5. 修改 Apple Intelligence 相關 eligibility domains。
 6. 將 Siri SAE orchestration mode 設成 `4`。
 7. 根據當前出口 IP 自動寫入 GeoServices 定位國家 cache。
-8. 重啟相關服務：
+8. 將 Location Services 裡 Siri 圖標的 runtime identity 修正合入 `load-region-spoof.sh`。
+9. 重啟相關服務：
 
    ```text
    eligibilityd
@@ -230,9 +238,9 @@ bless --create-snapshot
    cfprefsd
    ```
 
-9. 發送 availability / eligibility notification。
-10. 恢復 Siri menu bar extra。
-11. 如果使用 `--all`，修正 Siri Launchpad 圖標來源並建立新 snapshot。
+10. 發送 availability / eligibility notification。
+11. 恢復 Siri menu bar extra。
+12. 如果使用 `--all`，修正 Siri Launchpad 圖標來源並建立新 snapshot。
 
 ## Eligibility 修改內容
 
