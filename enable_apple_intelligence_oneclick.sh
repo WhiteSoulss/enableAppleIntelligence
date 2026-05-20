@@ -581,6 +581,7 @@ apply_siri_location_icon_fix() {
   clean_siri_location_rows_for_icon_fix || true
 
   /usr/bin/killall locationd 2>/dev/null || true
+  /bin/launchctl kickstart -k system/com.apple.locationd 2>/dev/null || true
   /bin/sleep 3
 
   local locationd_pid
@@ -593,31 +594,35 @@ apply_siri_location_icon_fix() {
     echo "locationd did not restart before patch attempt"
   fi
 
-  local lldb_cmds="/tmp/codex_loader_assistantd_location_icon.lldb"
   local lldb_log="/tmp/codex_loader_assistantd_location_icon.log"
-  /bin/cat > "$lldb_cmds" <<EOF2
-process attach -w -n assistantd
-command script import "$SIRI_ASSISTANTD_PATCH"
-expr -l objc++ -O -- (id)AFEffectiveSiriBundleForLocation()
-expr -l objc++ -O -- (id)AFEffectiveSiriBundlePathForLocation()
-process continue
-EOF2
+  local assistantd_pid=""
 
   /usr/bin/pkill -f 'codex_loader_assistantd_location_icon|lldb.*assistantd' 2>/dev/null || true
   /bin/rm -f "$lldb_log" 2>/dev/null || true
-  (/usr/bin/lldb -s "$lldb_cmds" > "$lldb_log" 2>&1) &
-  /bin/sleep 1
 
   /bin/launchctl bootstrap "gui/$uid" "$ASSISTANTD_PLIST" 2>/dev/null || true
   /bin/launchctl kickstart -k "gui/$uid/com.apple.assistantd" 2>/dev/null || true
+  /bin/sleep 8
 
-  for _ in {1..30}; do
-    if /usr/bin/grep -q "/System/Library/CoreServices/Siri.app" "$lldb_log" 2>/dev/null; then
+  for _ in {1..20}; do
+    assistantd_pid="$(/usr/bin/pgrep -x assistantd | /usr/bin/head -1 || true)"
+    if [[ -n "$assistantd_pid" ]]; then
       break
     fi
     /bin/sleep 1
   done
 
+  if [[ -n "$assistantd_pid" ]]; then
+    /usr/bin/lldb --batch -p "$assistantd_pid" \
+      -o "command script import \"$SIRI_ASSISTANTD_PATCH\"" \
+      -o 'expr -l objc++ -O -- (id)AFEffectiveSiriBundleForLocation()' \
+      -o 'expr -l objc++ -O -- (id)AFEffectiveSiriBundlePathForLocation()' \
+      -o 'process detach' -o quit > "$lldb_log" 2>&1 || true
+  else
+    echo "assistantd did not start before patch attempt" > "$lldb_log"
+  fi
+
+  clean_siri_location_rows_for_icon_fix || true
   /usr/bin/tail -40 "$lldb_log" 2>/dev/null || true
   /usr/bin/killall "System Settings" SecurityPrivacyExtension cfprefsd iconservicesagent IconServicesAgent 2>/dev/null || true
 }
@@ -1084,6 +1089,7 @@ apply_siri_location_icon_runtime_fix_now() {
   echo
   echo "== 2. Restart and patch locationd so it does not associate back to com.apple.assistantd =="
   run_root /usr/bin/killall locationd 2>/dev/null || true
+  run_root /bin/launchctl kickstart -k system/com.apple.locationd 2>/dev/null || true
   sleep 3
 
   locationd_pid="$(pgrep -x locationd | head -1 || true)"
@@ -1101,28 +1107,33 @@ apply_siri_location_icon_runtime_fix_now() {
   echo "== 3. Patch assistantd effective Siri location bundle early =="
   pkill -f "codex_fix_siri_location_icon_assistantd|lldb.*assistantd" 2>/dev/null || true
 
-  cat > "$lldb_cmds" <<EOF
-process attach -w -n assistantd
-command script import "$assistant_patch"
-expr -l objc++ -O -- (id)AFEffectiveSiriBundleForLocation()
-expr -l objc++ -O -- (id)AFEffectiveSiriBundlePathForLocation()
-process continue
-EOF
-
   rm -f "$lldb_log"
-  (/usr/bin/lldb -s "$lldb_cmds" > "$lldb_log" 2>&1) &
-  sleep 1
 
   launchctl bootstrap "gui/$(id -u)" "$assistantd_plist" 2>/dev/null || true
   launchctl kickstart -k "$assistantd_label" 2>/dev/null || true
+  sleep 8
 
-  for _ in {1..30}; do
-    if grep -q "/System/Library/CoreServices/Siri.app" "$lldb_log" 2>/dev/null; then
+  local assistantd_pid=""
+  for _ in {1..20}; do
+    assistantd_pid="$(pgrep -x assistantd | head -1 || true)"
+    if [[ -n "$assistantd_pid" ]]; then
       break
     fi
     sleep 1
   done
+
+  if [[ -z "$assistantd_pid" ]]; then
+    echo "assistantd did not start; skipping immediate assistantd patch." > "$lldb_log"
+  else
+    /usr/bin/lldb --batch -p "$assistantd_pid" \
+      -o "command script import \"$assistant_patch\"" \
+      -o 'expr -l objc++ -O -- (id)AFEffectiveSiriBundleForLocation()' \
+      -o 'expr -l objc++ -O -- (id)AFEffectiveSiriBundlePathForLocation()' \
+      -o 'process detach' -o quit > "$lldb_log" 2>&1 || true
+  fi
+
   tail -35 "$lldb_log" || true
+  clean_siri_location_rows_now || true
 
   echo
   echo "== 4. Restart UI and trigger new Siri registration =="
