@@ -190,6 +190,8 @@ tools/CodexRegionSpoof.kext
 
 Location Services 裡 Siri 圖標是另一條路徑：它的權限身份是 `AssistantServices.framework`，但顯示圖標應該取 `/System/Applications/Siri.app`。主腳本會把這個 locationd runtime 修正合入既有的 `load-region-spoof.sh` 開機流程。
 
+Siri / Safari 的網頁搜索 provider 也是另一條鏈。主腳本會把全局 web search provider 明確設為 Google，並在備份 Safari plist 後移除 `RecentWebSearches` 裡殘留的 Baidu URL，避免舊搜索歷史被誤判成當前 provider。
+
 ## 腳本具體做了什麼
 
 `enable_apple_intelligence_oneclick.sh` 會做以下事情：
@@ -208,7 +210,8 @@ Location Services 裡 Siri 圖標是另一條路徑：它的權限身份是 `Ass
 6. 將 Siri SAE orchestration mode 設成 `4`。
 7. 根據當前出口 IP 自動寫入 GeoServices 定位國家 cache。
 8. 將 Location Services 裡 Siri 圖標的 runtime identity 修正合入 `load-region-spoof.sh`。
-9. 重啟相關服務：
+9. 將 Siri / Safari web search provider 正規化為 Google，並清理 Safari RecentWebSearches 裡的舊 Baidu 條目。
+10. 重啟相關服務：
 
    ```text
    eligibilityd
@@ -224,9 +227,9 @@ Location Services 裡 Siri 圖標是另一條路徑：它的權限身份是 `Ass
    cfprefsd
    ```
 
-10. 發送 availability / eligibility notification。
-11. 恢復 Siri menu bar extra。
-12. 如果使用 `--all`，刷新 Siri Launchpad 圖標註冊；只有在舊補丁破壞過 Siri.app Info.plist 時才需要修復 snapshot。
+11. 發送 availability / eligibility notification。
+12. 恢復 Siri menu bar extra。
+13. 如果使用 `--all`，刷新 Siri Launchpad 圖標註冊；只有在舊補丁破壞過 Siri.app Info.plist 時才需要修復 snapshot。
 
 ## Eligibility 修改內容
 

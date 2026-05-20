@@ -11,6 +11,7 @@ DO_ELIGIBILITY=1
 DO_SAE=1
 DO_LOCATION_IP_FIX=1
 DO_SIRI_LOCATION_ICON_RUNTIME_FIX=1
+DO_WEB_SEARCH_FIX=1
 DO_VERIFY_ONLY=0
 DO_UNINSTALL=0
 DO_UNINSTALL_DRY_RUN=0
@@ -75,6 +76,7 @@ Options:
   --skip-location-ip    Do not set GeoServices location country from public IP.
   --skip-siri-location-icon
                         Do not integrate the Location Services Siri icon runtime fix.
+  --skip-web-search     Do not normalize the Siri/Safari web search provider to Google.
   -h, --help            Show this help.
 
 Recovery prerequisites:
@@ -92,6 +94,7 @@ What this single script does:
   - forces Siri SAE orchestration mode
   - sets GeoServices location country from the current public IP exit country
   - integrates the Location Services Siri icon fix into load-region-spoof.sh
+  - normalizes the Siri/Safari web search provider to Google
   - refreshes affected availability clients
   - optionally refreshes Siri Launchpad icon registration
 
@@ -115,6 +118,7 @@ while [[ $# -gt 0 ]]; do
       DO_SAE=0
       DO_LOCATION_IP_FIX=0
       DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
+      DO_WEB_SEARCH_FIX=0
       ;;
     --verify-only)
       DO_VERIFY_ONLY=1
@@ -124,6 +128,7 @@ while [[ $# -gt 0 ]]; do
       DO_SAE=0
       DO_LOCATION_IP_FIX=0
       DO_ICON_FIX=0
+      DO_WEB_SEARCH_FIX=0
       ;;
     --uninstall)
       DO_UNINSTALL=1
@@ -133,6 +138,7 @@ while [[ $# -gt 0 ]]; do
       DO_SAE=0
       DO_LOCATION_IP_FIX=0
       DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
+      DO_WEB_SEARCH_FIX=0
       DO_ICON_FIX=0
       ;;
     --dry-run)
@@ -144,6 +150,7 @@ while [[ $# -gt 0 ]]; do
       DO_SAE=0
       DO_LOCATION_IP_FIX=0
       DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
+      DO_WEB_SEARCH_FIX=0
       DO_ICON_FIX=0
       ;;
     --skip-kext)
@@ -163,6 +170,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-siri-location-icon)
       DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
+      ;;
+    --skip-web-search)
+      DO_WEB_SEARCH_FIX=0
       ;;
     -h|--help)
       usage
@@ -916,6 +926,66 @@ PY
   echo "Set location country cache from public IP. Reopen Maps/Weather and test current location."
 }
 
+force_web_search_provider_google() {
+  section "Normalize Siri/Safari web search provider"
+
+  defaults write NSGlobalDomain NSWebServicesProviderWebSearch -dict \
+    NSDefaultDisplayName Google \
+    NSProviderIdentifier com.google.www \
+    NSProviderIdentifier2 com.google.www
+
+  /usr/bin/python3 <<'PY'
+import os
+import plistlib
+import shutil
+import time
+
+paths = [
+    os.path.expanduser("~/Library/Containers/com.apple.Safari/Data/Library/Preferences/com.apple.Safari.plist"),
+    os.path.expanduser("~/Library/Preferences/com.apple.Safari.plist"),
+]
+
+for path in paths:
+    if not os.path.exists(path):
+        continue
+    try:
+        with open(path, "rb") as f:
+            data = plistlib.load(f)
+    except Exception as exc:
+        print(f"{path}: read failed: {exc}")
+        continue
+
+    recent = data.get("RecentWebSearches")
+    if not isinstance(recent, list):
+        print(f"{path}: no RecentWebSearches")
+        continue
+
+    kept = [item for item in recent if "baidu" not in str(item).lower()]
+    removed = len(recent) - len(kept)
+    if removed == 0:
+        print(f"{path}: removed stale Baidu searches=0")
+        continue
+
+    backup = f"{path}.backup-codex-baidu-{time.strftime('%Y%m%d-%H%M%S')}"
+    shutil.copy2(path, backup)
+    data["RecentWebSearches"] = kept
+
+    tmp = f"{path}.codex-tmp"
+    with open(tmp, "wb") as f:
+        plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
+
+    stat = os.stat(path)
+    os.chown(tmp, stat.st_uid, stat.st_gid)
+    os.chmod(tmp, stat.st_mode & 0o7777)
+    os.replace(tmp, path)
+    print(f"{path}: removed stale Baidu searches={removed}, backup={backup}")
+PY
+
+  killall cfprefsd Safari assistantd SiriNCService Siri 2>/dev/null || true
+  echo "Web search provider:"
+  defaults read NSGlobalDomain NSWebServicesProviderWebSearch 2>/dev/null || true
+}
+
 restore_siri_menu_bar_extra() {
   section "Restore Siri menu bar extra"
   defaults write com.apple.systemuiserver menuExtras -array /System/Library/CoreServices/Siri.bundle
@@ -1375,6 +1445,7 @@ fi
 [[ "$DO_ELIGIBILITY" == "1" ]] && patch_eligibility_domains
 [[ "$DO_SAE" == "1" ]] && force_siri_sae_orchestration_mode
 [[ "$DO_LOCATION_IP_FIX" == "1" ]] && pin_geoservices_location_country_from_ip
+[[ "$DO_WEB_SEARCH_FIX" == "1" ]] && force_web_search_provider_google
 [[ "$DO_SIRI_LOCATION_ICON_RUNTIME_FIX" == "1" ]] && install_siri_location_icon_runtime_fix
 
 if [[ "$DO_ICON_ONLY" == "0" ]]; then
