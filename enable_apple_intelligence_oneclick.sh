@@ -412,65 +412,72 @@ PY
 
   cat > "$locationd_tmp" <<'PY'
 """
-Runtime patch for the Location Services duplicate Siri row.
+Runtime patch for the Location Services duplicate Siri rows.
 
-When assistantd registers an effective CoreLocation identity, locationd can
-associate it back to the natural audit identity com.apple.assistantd. That
-creates a second Siri row using the old assistantd icon. This makes
-CLClientManagerAdapter syncgetAssociateRegistrationIdentity:withName: return
-false, so the old identity is not associated into the auth database.
+Do not synthesize a fake Siri.app row. The natural CoreLocation client for
+Siri is AssistantServices.framework, and System Settings resolves that as Siri.
+The duplicate rows come from derived identities such as com.apple.assistantd
+and older artificial /System/Library/CoreServices/Siri.app rows. Filter those
+at locationd's client-list boundary so every consumer sees the same list.
 """
 
 import lldb
-import struct
 
 
-METHOD = "syncgetAssociateRegistrationIdentity:withName:"
+METHOD = "syncgetCopyClients"
 CLASS = "CLClientManagerAdapter"
-RETURN_FALSE = struct.pack("<II", 0x52800000, 0xD65F03C0)
 
 
-def _eval_objc(target, expr):
-    value = target.EvaluateExpression(expr)
-    if not value or not value.IsValid() or value.GetError().Fail():
-        raise RuntimeError(f"expression failed: {expr}: {value.GetError() if value else 'invalid'}")
-    text = value.GetValue() or value.GetObjectDescription() or ""
-    return int(text, 0) & 0x7FFFFFFFFF
+EXPR = r'''
+@import Foundation;
+@import ObjectiveC;
+Class cdxf_cls=(Class)NSClassFromString(@"CLClientManagerAdapter");
+SEL cdxf_sel=(SEL)NSSelectorFromString(@"syncgetCopyClients");
+Method cdxf_method=class_getInstanceMethod(cdxf_cls, cdxf_sel);
+static id (*cdxf_origCopyClients)(id,SEL) = NULL;
+if (cdxf_origCopyClients == NULL) {
+  cdxf_origCopyClients=(id(*)(id,SEL))method_getImplementation(cdxf_method);
+  id cdxf_block = ^id(id obj) {
+    id cdxf_clients = cdxf_origCopyClients(obj, cdxf_sel);
+    NSMutableDictionary *cdxf_filtered = [(NSDictionary *)cdxf_clients mutableCopy];
+    NSArray *cdxf_keys = [(NSDictionary *)cdxf_clients allKeys];
+    for (id cdxf_key in cdxf_keys) {
+      id cdxf_val = [(NSDictionary *)cdxf_clients objectForKey:cdxf_key];
+      NSString *cdxf_s = [NSString stringWithFormat:@"%@ %@", cdxf_key, cdxf_val];
+      NSString *cdxf_lower = [cdxf_s lowercaseString];
+      if ([cdxf_lower containsString:@"com.apple.assistantd"] ||
+          [cdxf_lower containsString:@"/system/library/coreservices/siri.app"] ||
+          [cdxf_lower containsString:@"coreservices/siri.app"]) {
+        [cdxf_filtered removeObjectForKey:cdxf_key];
+      }
+    }
+    return cdxf_filtered;
+  };
+  IMP cdxf_imp=imp_implementationWithBlock(cdxf_block);
+  method_setImplementation(cdxf_method, cdxf_imp);
+}
+@"patched syncgetCopyClients Siri duplicate filter"
+'''
 
 
 def __lldb_init_module(debugger, _dict):
     target = debugger.GetSelectedTarget()
     process = target.GetProcess()
     if not process or not process.IsValid():
-        print("[patch-locationd-association] no process")
+        print("[patch-locationd-siri-filter] no process")
         return
 
-    try:
-        addr = _eval_objc(
-            target,
-            (
-                "@import ObjectiveC; "
-                f'(unsigned long long)method_getImplementation(class_getInstanceMethod((Class)objc_getClass("{CLASS}"), sel_registerName("{METHOD}")))'
-            ),
-        )
-        err = lldb.SBError()
-        old = process.ReadMemory(addr, len(RETURN_FALSE), err)
-        if err.Fail():
-            raise RuntimeError(f"read failed @ 0x{addr:x}: {err}")
+    value = target.EvaluateExpression(EXPR)
+    if not value or not value.IsValid() or value.GetError().Fail():
+        print(f"[patch-locationd-siri-filter] ERROR: {value.GetError() if value else 'invalid expression'}")
+        return
 
-        err = lldb.SBError()
-        written = process.WriteMemory(addr, RETURN_FALSE, err)
-        if err.Fail() or written != len(RETURN_FALSE):
-            raise RuntimeError(f"write failed @ 0x{addr:x}: {err}, written={written}")
-
-        print(f"[patch-locationd-association] patched {CLASS} {METHOD} @ 0x{addr:x}")
-        print(f"  old={old.hex()} new={RETURN_FALSE.hex()}")
-    except Exception as exc:
-        print(f"[patch-locationd-association] ERROR: {exc}")
+    print(f"[patch-locationd-siri-filter] patched {CLASS} {METHOD}")
+    print(value.GetObjectDescription() or value.GetValue() or "")
 PY
 
   run_root mkdir -p "$SIRI_LOCATION_FIX_DIR"
-  run_root install -o root -g wheel -m 644 "$assistant_tmp" "$SIRI_LOCATION_FIX_DIR/patch_assistant_effective_siri_location_lldb.py"
+  run_root rm -f "$SIRI_LOCATION_FIX_DIR/patch_assistant_effective_siri_location_lldb.py"
   run_root install -o root -g wheel -m 644 "$locationd_tmp" "$SIRI_LOCATION_FIX_DIR/patch_locationd_skip_assistantd_association_lldb.py"
   rm -f "$assistant_tmp" "$locationd_tmp"
 }
@@ -511,7 +518,7 @@ console_uid() {
 
 clean_siri_location_rows_for_icon_fix() {
   if [[ ! -f "$CLIENTS_PLIST" ]]; then
-    echo "Location Services clients plist not present yet; seeding Siri.app row: $CLIENTS_PLIST"
+    echo "Location Services clients plist not present yet; creating empty clients plist: $CLIENTS_PLIST"
   fi
 
   /usr/bin/python3 - "$CLIENTS_PLIST" <<'PY'
@@ -534,44 +541,17 @@ def is_siri_location_row(key, value):
     text = f"{key}\n{value}".lower()
     return (
         "assistantd" in text
-        or "assistantservices.framework" in text
         or "com.apple.siri" in text
         or "coreservices/siri.app" in text
     )
 
 remove_keys = [key for key, value in data.items() if is_siri_location_row(key, value)]
-user_prefix = None
-for key in remove_keys:
-    parts = str(key).split(":", 1)
-    if len(parts) == 2 and parts[0]:
-        user_prefix = parts[0]
-        break
-if user_prefix is None:
-    for key in data:
-        parts = str(key).split(":", 1)
-        if len(parts) == 2 and parts[0] and "-" in parts[0]:
-            user_prefix = parts[0]
-            break
-if user_prefix is None:
-    user_prefix = "C80F3519-643E-4FB1-8F4E-4F18A602D7D6"
 
 backup = f"{plist_path}.backup-codex-siri-icon-{time.strftime('%Y%m%d-%H%M%S')}"
 if os.path.exists(plist_path):
     shutil.copy2(plist_path, backup)
 for key in remove_keys:
     data.pop(key, None)
-
-siri_key = f"{user_prefix}:p/System/Library/CoreServices/Siri.app:"
-old_siri = data.get(siri_key, {})
-token = old_siri.get("ClientStorageToken")
-if not isinstance(token, (bytes, bytearray)) or len(token) != 32:
-    token = os.urandom(32)
-data[siri_key] = {
-    "Authorized": True,
-    "BundlePath": "/System/Library/CoreServices/Siri.app",
-    "ClientStorageToken": bytes(token),
-    "Registered": True,
-}
 
 tmp = f"{plist_path}.codex-tmp"
 with open(tmp, "wb") as f:
@@ -590,12 +570,12 @@ print(f"backup={backup}")
 print(f"removed={len(remove_keys)}")
 for key in remove_keys:
     print(f"  {key}")
-print(f"ensured={siri_key}")
+print("kept natural AssistantServices.framework Siri row if present")
 PY
 }
 
 apply_siri_location_icon_fix() {
-  if [[ ! -f "$SIRI_ASSISTANTD_PATCH" || ! -f "$SIRI_LOCATIOND_PATCH" ]]; then
+  if [[ ! -f "$SIRI_LOCATIOND_PATCH" ]]; then
     echo "Siri Location icon payload missing under $SIRI_FIX_DIR; skipping"
     return 0
   fi
@@ -618,8 +598,6 @@ apply_siri_location_icon_fix() {
 
   echo "applying Siri Location icon runtime fix for $user uid=$uid"
   /usr/bin/killall lldb debugserver 2>/dev/null || true
-  /bin/launchctl bootout "gui/$uid/com.apple.assistantd" 2>/dev/null || true
-  /usr/bin/killall assistantd 2>/dev/null || true
 
   /usr/bin/killall locationd 2>/dev/null || true
   /bin/sleep 1
@@ -637,65 +615,11 @@ apply_siri_location_icon_fix() {
     echo "locationd did not restart before patch attempt"
   fi
 
-  local lldb_log="/tmp/codex_loader_assistantd_location_icon.log"
-  local assistantd_pid=""
-
-  /usr/bin/pkill -f 'codex_loader_assistantd_location_icon|lldb.*assistantd' 2>/dev/null || true
-  /bin/rm -f "$lldb_log" 2>/dev/null || true
-
   /bin/launchctl bootstrap "gui/$uid" "$ASSISTANTD_PLIST" 2>/dev/null || true
   /bin/launchctl kickstart -k "gui/$uid/com.apple.assistantd" 2>/dev/null || true
-  /bin/sleep 8
-
-  for _ in {1..20}; do
-    assistantd_pid="$(/usr/bin/pgrep -x assistantd | /usr/bin/head -1 || true)"
-    if [[ -n "$assistantd_pid" ]]; then
-      break
-    fi
-    /bin/sleep 1
-  done
-
-  if [[ -n "$assistantd_pid" ]]; then
-    /usr/bin/lldb --batch -p "$assistantd_pid" \
-      -o "command script import \"$SIRI_ASSISTANTD_PATCH\"" \
-      -o 'expr -l objc++ -O -- (id)AFEffectiveSiriBundleForLocation()' \
-      -o 'expr -l objc++ -O -- (id)AFEffectiveSiriBundlePathForLocation()' \
-      -o 'process detach' -o quit > "$lldb_log" 2>&1 || true
-  else
-    echo "assistantd did not start before patch attempt" > "$lldb_log"
-  fi
-
-  /bin/launchctl bootout "gui/$uid/com.apple.assistantd" 2>/dev/null || true
-  /usr/bin/killall assistantd 2>/dev/null || true
-  /usr/bin/killall locationd 2>/dev/null || true
-  /bin/sleep 1
-  clean_siri_location_rows_for_icon_fix || true
-  /bin/launchctl kickstart -k system/com.apple.locationd 2>/dev/null || true
-  /bin/sleep 2
-
-  locationd_pid="$(/usr/bin/pgrep -x locationd | /usr/bin/head -1 || true)"
-  if [[ -n "$locationd_pid" ]]; then
-    /usr/bin/lldb --batch -p "$locationd_pid" \
-      -o "command script import \"$SIRI_LOCATIOND_PATCH\"" \
-      -o 'process detach' -o quit || true
-  fi
-
-  /bin/launchctl bootstrap "gui/$uid" "$ASSISTANTD_PLIST" 2>/dev/null || true
-  /bin/launchctl kickstart -k "gui/$uid/com.apple.assistantd" 2>/dev/null || true
-  /bin/sleep 5
-  assistantd_pid="$(/usr/bin/pgrep -x assistantd | /usr/bin/head -1 || true)"
-  if [[ -n "$assistantd_pid" ]]; then
-    /usr/bin/lldb --batch -p "$assistantd_pid" \
-      -o "command script import \"$SIRI_ASSISTANTD_PATCH\"" \
-      -o 'expr -l objc++ -O -- (id)AFEffectiveSiriBundleForLocation()' \
-      -o 'expr -l objc++ -O -- (id)AFEffectiveSiriBundlePathForLocation()' \
-      -o 'process detach' -o quit >> "$lldb_log" 2>&1 || true
-  fi
-
-  /bin/sleep 2
+  /bin/sleep 3
   clean_siri_location_rows_for_icon_fix || true
 
-  /usr/bin/tail -40 "$lldb_log" 2>/dev/null || true
   /usr/bin/killall "System Settings" SecurityPrivacyExtension cfprefsd iconservicesagent IconServicesAgent 2>/dev/null || true
 }
 
@@ -1082,7 +1006,7 @@ clean_siri_location_rows_now() {
   local clients_plist="/var/db/locationd/clients.plist"
 
   if [[ ! -f "$clients_plist" ]]; then
-    echo "Location Services clients plist not present yet; seeding Siri.app row: $clients_plist"
+    echo "Location Services clients plist not present yet; creating empty clients plist: $clients_plist"
   fi
 
   cat > "$cleaner" <<'PY'
@@ -1106,26 +1030,11 @@ def is_siri_location_row(key, value):
     text = f"{key}\n{value}".lower()
     return (
         "assistantd" in text
-        or "assistantservices.framework" in text
         or "com.apple.siri" in text
         or "coreservices/siri.app" in text
     )
 
 remove_keys = [key for key, value in data.items() if is_siri_location_row(key, value)]
-user_prefix = None
-for key in remove_keys:
-    parts = str(key).split(":", 1)
-    if len(parts) == 2 and parts[0]:
-        user_prefix = parts[0]
-        break
-if user_prefix is None:
-    for key in data:
-        parts = str(key).split(":", 1)
-        if len(parts) == 2 and parts[0] and "-" in parts[0]:
-            user_prefix = parts[0]
-            break
-if user_prefix is None:
-    user_prefix = "C80F3519-643E-4FB1-8F4E-4F18A602D7D6"
 
 backup = f"{plist_path}.backup-codex-siri-icon-{time.strftime('%Y%m%d-%H%M%S')}"
 if os.path.exists(plist_path):
@@ -1133,18 +1042,6 @@ if os.path.exists(plist_path):
 
 for key in remove_keys:
     data.pop(key, None)
-
-siri_key = f"{user_prefix}:p/System/Library/CoreServices/Siri.app:"
-old_siri = data.get(siri_key, {})
-token = old_siri.get("ClientStorageToken")
-if not isinstance(token, (bytes, bytearray)) or len(token) != 32:
-    token = os.urandom(32)
-data[siri_key] = {
-    "Authorized": True,
-    "BundlePath": "/System/Library/CoreServices/Siri.app",
-    "ClientStorageToken": bytes(token),
-    "Registered": True,
-}
 
 tmp = f"{plist_path}.codex-tmp"
 with open(tmp, "wb") as f:
@@ -1163,7 +1060,7 @@ print(f"backup={backup}")
 print(f"removed={len(remove_keys)}")
 for key in remove_keys:
     print(f"  {key}")
-print(f"ensured={siri_key}")
+print("kept natural AssistantServices.framework Siri row if present")
 PY
 
   run_root /usr/bin/python3 "$cleaner" "$clients_plist"
@@ -1173,29 +1070,24 @@ PY
 apply_siri_location_icon_runtime_fix_now() {
   section "Apply Location Services Siri icon runtime fix now"
 
-  local assistant_patch="$SIRI_LOCATION_FIX_DIR/patch_assistant_effective_siri_location_lldb.py"
   local locationd_patch="$SIRI_LOCATION_FIX_DIR/patch_locationd_skip_assistantd_association_lldb.py"
   local assistantd_label="gui/$(id -u)/com.apple.assistantd"
   local assistantd_plist="/System/Library/LaunchAgents/com.apple.assistantd.plist"
-  local lldb_cmds="/tmp/codex_fix_siri_location_icon_assistantd.lldb"
-  local lldb_log="/tmp/codex_fix_siri_location_icon_assistantd.log"
   local locationd_lldb_log="/tmp/codex_fix_siri_location_icon_locationd.log"
   local clients_dump="/tmp/codex_fix_siri_location_clients.txt"
   local locationd_pid
   local spe_pid
 
-  if [[ ! -f "$assistant_patch" || ! -f "$locationd_patch" ]]; then
+  if [[ ! -f "$locationd_patch" ]]; then
     echo "Missing Location Services Siri icon patch scripts; skipping immediate runtime fix."
     return 0
   fi
 
-  echo "== 1. Stop assistantd and remove stale Siri/assistantd Location Services rows =="
+  echo "== 1. Remove stale derived Siri Location Services rows =="
   run_root /usr/bin/killall lldb debugserver 2>/dev/null || true
-  launchctl bootout "$assistantd_label" 2>/dev/null || true
-  killall assistantd 2>/dev/null || true
 
   echo
-  echo "== 2. Restart and patch locationd so it does not associate back to com.apple.assistantd =="
+  echo "== 2. Restart and patch locationd client-list output =="
   run_root /usr/bin/killall locationd 2>/dev/null || true
   sleep 1
   clean_siri_location_rows_now || true
@@ -1214,77 +1106,16 @@ apply_siri_location_icon_runtime_fix_now() {
   fi
 
   echo
-  echo "== 3. Patch assistantd effective Siri location bundle early =="
-  pkill -f "codex_fix_siri_location_icon_assistantd|lldb.*assistantd" 2>/dev/null || true
-
-  rm -f "$lldb_log"
-
+  echo "== 3. Keep assistantd running so Launchpad Siri remains functional =="
   launchctl bootstrap "gui/$(id -u)" "$assistantd_plist" 2>/dev/null || true
   launchctl kickstart -k "$assistantd_label" 2>/dev/null || true
-  sleep 8
-
-  local assistantd_pid=""
-  for _ in {1..20}; do
-    assistantd_pid="$(pgrep -x assistantd | head -1 || true)"
-    if [[ -n "$assistantd_pid" ]]; then
-      break
-    fi
-    sleep 1
-  done
-
-  if [[ -z "$assistantd_pid" ]]; then
-    echo "assistantd did not start; skipping immediate assistantd patch." > "$lldb_log"
-  else
-    /usr/bin/lldb --batch -p "$assistantd_pid" \
-      -o "command script import \"$assistant_patch\"" \
-      -o 'expr -l objc++ -O -- (id)AFEffectiveSiriBundleForLocation()' \
-      -o 'expr -l objc++ -O -- (id)AFEffectiveSiriBundlePathForLocation()' \
-      -o 'process detach' -o quit > "$lldb_log" 2>&1 || true
-  fi
-
-  tail -35 "$lldb_log" || true
-
-  echo
-  echo "== 3b. Stop locationd first, then persist only the Siri.app CoreLocation row =="
-  launchctl bootout "$assistantd_label" 2>/dev/null || true
-  killall assistantd 2>/dev/null || true
-  run_root /usr/bin/killall locationd 2>/dev/null || true
-  sleep 1
-  clean_siri_location_rows_now || true
-  run_root /bin/launchctl kickstart -k system/com.apple.locationd 2>/dev/null || true
-  sleep 2
-  locationd_pid="$(pgrep -x locationd | head -1 || true)"
-  if [[ -n "$locationd_pid" ]]; then
-    run_root /usr/bin/lldb --batch -p "$locationd_pid" \
-      -o "command script import \"$locationd_patch\"" \
-      -o 'process detach' -o quit > "$locationd_lldb_log" 2>&1 || true
-    tail -20 "$locationd_lldb_log" || true
-  fi
-
-  echo
-  echo "== 3c. Restart assistantd so Launchpad Siri remains functional =="
-  launchctl bootstrap "gui/$(id -u)" "$assistantd_plist" 2>/dev/null || true
-  launchctl kickstart -k "$assistantd_label" 2>/dev/null || true
-  sleep 5
-  assistantd_pid="$(pgrep -x assistantd | head -1 || true)"
-  if [[ -z "$assistantd_pid" ]]; then
-    echo "assistantd did not restart; Siri Launchpad may not respond."
-  else
-    /usr/bin/lldb --batch -p "$assistantd_pid" \
-      -o "command script import \"$assistant_patch\"" \
-      -o 'expr -l objc++ -O -- (id)AFEffectiveSiriBundleForLocation()' \
-      -o 'expr -l objc++ -O -- (id)AFEffectiveSiriBundlePathForLocation()' \
-      -o 'process detach' -o quit > "$lldb_log" 2>&1 || true
-    tail -25 "$lldb_log" || true
-  fi
   sleep 2
   clean_siri_location_rows_now || true
 
   echo
-  echo "== 4. Restart UI and trigger new Siri registration =="
+  echo "== 4. Restart UI and trigger Location Services reload =="
   killall "System Settings" SecurityPrivacyExtension cfprefsd iconservicesagent IconServicesAgent 2>/dev/null || true
   sleep 2
-  open -a Siri 2>/dev/null || true
 
   echo
   echo "== 5. Verify CoreLocation identities =="
