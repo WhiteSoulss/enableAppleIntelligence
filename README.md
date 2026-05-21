@@ -418,15 +418,23 @@ Weather
 ./enable_apple_intelligence_oneclick.sh --skip-location-ip
 ```
 
-### 6. 比較高安全狀態怎麼設置
+### 6. 成功後如何恢復比較高安全狀態
 
-在已經成功啟用 Apple Intelligence、並且 `country-of-origin = USA` / `region-info = LL/A` 後，可以把安全狀態收緊到比較高的狀態。
+先完成一鍵腳本，確認 Apple Intelligence / Writing Tools / Image Playground / Photos Clean Up 已經可用，並確認底層值已經固定為：
+
+```text
+country-of-origin = USA
+region-info = LL/A
+```
+
+確認成功後，建議把安全狀態收緊到下面這個狀態：
 
 目標狀態：
 
 ```text
 SIP: enabled
 Authenticated Root: enabled
+FileVault: on
 Startup Security: Reduced Security
 3rd Party Kexts: Enabled
 Signed System Volume: Enabled
@@ -463,11 +471,23 @@ Signed System Volume: Enabled
    Allow user management of kernel extensions from identified developers
    ```
 
-4. 重啟回 macOS 後檢查：
+4. 重啟回 macOS 後，打開 FileVault：
+
+   ```text
+   System Settings
+     -> Privacy & Security
+     -> FileVault
+     -> Turn On
+   ```
+
+   FileVault 是磁碟加密，和 SSV / authenticated-root 不是同一個開關。打開 FileVault 不會破壞 Apple Intelligence 狀態，也不會阻止 `/Library/Extensions/CodexRegionSpoof.kext` 從 Data Volume 載入。
+
+5. 檢查狀態：
 
    ```bash
    csrutil status
    csrutil authenticated-root status
+   fdesetup status
    sudo bputil -d | grep -E 'Security Mode|3rd Party Kexts|Signed System Volume'
    ioreg -rd1 -c IOPlatformExpertDevice | grep -Ei 'region-info|country-of-origin'
    sudo kmutil showloaded | grep -Ei 'Codex|RegionSpoof'
@@ -478,6 +498,7 @@ Signed System Volume: Enabled
    ```text
    System Integrity Protection status: enabled.
    Authenticated Root status: enabled
+   FileVault is On.
    Security Mode: Permissive / Reduced Security
    3rd Party Kexts Status: Enabled
    Signed System Volume Status: Enabled
@@ -486,7 +507,7 @@ Signed System Volume: Enabled
    local.codex.RegionSpoof loaded
    ```
 
-5. 再重啟一次，再查同樣的值。第二次重啟後仍然保持 `USA + LL/A`，才算穩定。
+6. 再重啟一次，再查同樣的值。第二次重啟後仍然保持 `USA + LL/A`，才算穩定。
 
 如果重啟後變回：
 
