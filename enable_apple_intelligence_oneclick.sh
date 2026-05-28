@@ -37,15 +37,9 @@ UNINSTALL_BACKUP_ROOT="$HOME/Documents/Codex/enableAppleIntelligence-restore-bac
 SIRI_DOMAIN="com.apple.assistant.backedup"
 SIRI_KEY="SiriAvailability"
 SIRI_PREF="$HOME/Library/Preferences/${SIRI_DOMAIN}.plist"
-SIRI_ICON_MNT="/private/tmp/codex_system_rw"
-SIRI_ICON_DEVICE="/dev/disk3s5"
-SIRI_ICON_INFO="${SIRI_ICON_MNT}/System/Applications/Siri.app/Contents/Info.plist"
+APPLEID_SETTINGS_SIRI_PREF="$HOME/Library/Containers/com.apple.systempreferences.AppleIDSettings/Data/Library/Preferences/${SIRI_DOMAIN}.plist"
 SIRI_SYSTEM_APP="/System/Applications/Siri.app"
 SIRI_CORESERVICES_APP="/System/Library/CoreServices/Siri.app"
-SIRI_ICON_SYSTEM_APP="${SIRI_ICON_MNT}/System/Applications/Siri.app"
-SIRI_ICON_CORESERVICES_APP="${SIRI_ICON_MNT}/System/Library/CoreServices/Siri.app"
-SIRI_ICON_SYSTEM_APPICON="${SIRI_ICON_SYSTEM_APP}/Contents/Resources/AppIcon.icns"
-SIRI_ICON_CORESERVICES_APPICON="${SIRI_ICON_CORESERVICES_APP}/Contents/Resources/AppIcon.icns"
 
 ELIGIBILITYD_DOMAINS=(
   OS_ELIGIBILITY_DOMAIN_GREYMATTER
@@ -69,10 +63,10 @@ Usage:
   ./enable_apple_intelligence_oneclick.sh [options]
 
 Options:
-  --all                 Run core enable steps and patch the durable Siri icon source.
-  --fix-siri-icon       Patch the durable Siri icon source only.
-                        Needs authenticated-root disabled when CoreServices/Siri.app
-                        still has the old AppIcon source.
+  --all                 Run core enable steps and refresh the Siri icon identity.
+  --fix-siri-icon       Refresh/verify the Siri icon identity only.
+                        Uses Apple's built-in IconServices
+                        com.apple.application-icon.siri-intelligence asset.
   --verify-only         Only print current state; do not change anything.
   --uninstall           Back up local state, remove kext/LaunchDaemon, clear forced caches.
   --dry-run             With --uninstall, print restore actions without changing anything.
@@ -107,7 +101,7 @@ What this single script does:
   - integrates the Location Services Siri icon fix into load-region-spoof.sh
   - normalizes the Siri/Safari web search provider to Google
   - refreshes affected availability clients
-  - optionally patches the sealed Siri icon source used by com.apple.siri
+  - refreshes the Siri icon identity cache used by com.apple.siri
 
 Core steps use normal sudo prompting. The Siri Location Services icon runtime
 fix is applied once now and then re-applied by the existing boot-time
@@ -884,6 +878,36 @@ force_siri_sae_orchestration_mode() {
 
   echo "-- new SiriAvailability --"
   defaults read "$SIRI_DOMAIN" "$SIRI_KEY" 2>/dev/null || true
+
+  mirror_siri_availability_to_appleidsettings
+}
+
+mirror_siri_availability_to_appleidsettings() {
+  section "Mirror SiriAvailability into AppleIDSettings container"
+  local dst_dir backup_dir ts
+  dst_dir="$(dirname "$APPLEID_SETTINGS_SIRI_PREF")"
+  backup_dir="$ROOT_DIR/backups/appleidsettings-siri-availability"
+  ts="$(date +%Y%m%d-%H%M%S)"
+
+  if [[ ! -f "$SIRI_PREF" ]]; then
+    echo "Global SiriAvailability plist is missing: $SIRI_PREF"
+    return 0
+  fi
+
+  mkdir -p "$dst_dir" "$backup_dir"
+  if [[ -f "$APPLEID_SETTINGS_SIRI_PREF" ]]; then
+    cp -p "$APPLEID_SETTINGS_SIRI_PREF" "$backup_dir/${SIRI_DOMAIN}.AppleIDSettings.${ts}.plist"
+    echo "Backup: $backup_dir/${SIRI_DOMAIN}.AppleIDSettings.${ts}.plist"
+  fi
+
+  cp -p "$SIRI_PREF" "$APPLEID_SETTINGS_SIRI_PREF"
+  chmod 600 "$APPLEID_SETTINGS_SIRI_PREF" 2>/dev/null || true
+  plutil -lint "$APPLEID_SETTINGS_SIRI_PREF" >/dev/null
+
+  echo "AppleIDSettings is sandboxed; its NSHomeDirectory is the container."
+  echo "Mirrored ${SIRI_DOMAIN}/${SIRI_KEY} so AOSUI can resolve the built-in"
+  echo "com.apple.application-icon.siri-intelligence icon for com.apple.siri."
+  killall AppleIDSettings "System Settings" cfprefsd iconservicesagent IconServicesAgent 2>/dev/null || true
 }
 
 detect_public_ip_geo() {
@@ -1201,30 +1225,16 @@ install_siri_location_icon_runtime_fix() {
   echo "Siri Location icon fix payload is now used by: $LOADER_SCRIPT"
 }
 
-find_system_volume_device() {
-  local root_dev sys_dev
-  root_dev="$(mount | awk '$3 == "/" {print $1; exit}')"
-  if [[ -z "$root_dev" ]]; then
-    echo "$SIRI_ICON_DEVICE"
-    return 0
-  fi
-  sys_dev="${root_dev%s[0-9]*}"
-  if [[ "$sys_dev" == "$root_dev" ]]; then
-    sys_dev="$root_dev"
-  fi
-  echo "$sys_dev"
-}
-
 patch_siri_launchpad_icon_source() {
-  section "Patch Siri icon source used by com.apple.siri"
+  section "Refresh Siri icon identity used by com.apple.siri"
   local backup_dir="$HOME/Documents/Codex/siri-icon-source-backups/$(date +%Y%m%d-%H%M%S)"
-  local sys_dev core_info system_hash core_hash needs_snapshot_edit=0
+  local probe_log="$backup_dir/iconservices-probe.txt"
+
+  mirror_siri_availability_to_appleidsettings
 
   mkdir -p "$backup_dir"
   cp "$SIRI_SYSTEM_APP/Contents/Info.plist" "$backup_dir/SystemApplications.Siri.Info.plist.live" 2>/dev/null || true
   cp "$SIRI_CORESERVICES_APP/Contents/Info.plist" "$backup_dir/CoreServices.Siri.Info.plist.live" 2>/dev/null || true
-  cp "$SIRI_SYSTEM_APP/Contents/Resources/AppIcon.icns" "$backup_dir/SystemApplications.Siri.AppIcon.icns.live" 2>/dev/null || true
-  cp "$SIRI_CORESERVICES_APP/Contents/Resources/AppIcon.icns" "$backup_dir/CoreServices.Siri.AppIcon.icns.live" 2>/dev/null || true
 
   echo "-- Live Siri identity sources --"
   echo "User-facing Siri app:"
@@ -1236,93 +1246,53 @@ patch_siri_launchpad_icon_source() {
   /usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$SIRI_CORESERVICES_APP/Contents/Info.plist" 2>/dev/null || true
   /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$SIRI_CORESERVICES_APP/Contents/Info.plist" 2>/dev/null || true
 
-  system_hash="$(shasum -a 256 "$SIRI_SYSTEM_APP/Contents/Resources/AppIcon.icns" 2>/dev/null | awk '{print $1}')"
-  core_hash="$(shasum -a 256 "$SIRI_CORESERVICES_APP/Contents/Resources/AppIcon.icns" 2>/dev/null | awk '{print $1}')"
-  echo "System/Applications Siri AppIcon: ${system_hash:-missing}"
-  echo "CoreServices Siri AppIcon:        ${core_hash:-missing}"
-
-  if [[ -z "$system_hash" || -z "$core_hash" || "$system_hash" != "$core_hash" ]]; then
-    needs_snapshot_edit=1
-    echo "CoreServices Siri.app has a different AppIcon; iCloud/AOSUI can still show the old Siri icon."
-  fi
-  if ! /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$SIRI_SYSTEM_APP/Contents/Info.plist" 2>/dev/null | grep -qx 'AppIcon'; then
-    needs_snapshot_edit=1
-    echo "User-facing Siri.app CFBundleIconName is not AppIcon and must be repaired."
-  fi
-  if ! /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$SIRI_CORESERVICES_APP/Contents/Info.plist" 2>/dev/null | grep -qx 'AppIcon'; then
-    needs_snapshot_edit=1
-    echo "CoreServices Siri.app CFBundleIconName is not AppIcon and must be repaired."
-  fi
-
-  if [[ "$needs_snapshot_edit" == "1" ]]; then
-    if ! csrutil authenticated-root status 2>/dev/null | grep -qi 'disabled'; then
-      cat >&2 <<'MSG'
-The source icon still needs a sealed System snapshot edit, but Authenticated
-Root is enabled and the live root is sealed/read-only.
-
-For the permanent Siri/iCloud icon-source fix, boot Recovery and run:
-
-  csrutil authenticated-root disable
-
-Then boot macOS and rerun:
-
-  ./enable_apple_intelligence_oneclick.sh --fix-siri-icon
-
-After it creates the new snapshot and you reboot, iCloud > See All and other
-AOSUI consumers of com.apple.siri should resolve the same modern Siri icon
-source as Launchpad/Menu Bar.
-MSG
-      exit 1
-    fi
-
-    sys_dev="$(find_system_volume_device)"
-    mkdir -p "$SIRI_ICON_MNT"
-    if ! mount | grep -q " on ${SIRI_ICON_MNT} "; then
-      run_root mount -t apfs -o nobrowse,rw "$sys_dev" "$SIRI_ICON_MNT"
-    fi
-
-    core_info="${SIRI_ICON_CORESERVICES_APP}/Contents/Info.plist"
-    if [[ ! -f "$SIRI_ICON_INFO" || ! -f "$core_info" || ! -f "$SIRI_ICON_SYSTEM_APPICON" ]]; then
-      echo "Missing mounted Siri files under $SIRI_ICON_MNT" >&2
-      exit 1
-    fi
-
-    cp "$SIRI_ICON_INFO" "$backup_dir/SystemApplications.Siri.Info.plist.snapshot.before"
-    cp "$core_info" "$backup_dir/CoreServices.Siri.Info.plist.snapshot.before"
-    cp "$SIRI_ICON_SYSTEM_APPICON" "$backup_dir/SystemApplications.Siri.AppIcon.icns.snapshot.before" 2>/dev/null || true
-    cp "$SIRI_ICON_CORESERVICES_APPICON" "$backup_dir/CoreServices.Siri.AppIcon.icns.snapshot.before" 2>/dev/null || true
-
-    echo "Repairing Siri icon source:"
-    echo "  1. Keep both Siri.app Info.plist icon keys at AppIcon."
-    echo "  2. Copy the modern /System/Applications/Siri.app AppIcon.icns to CoreServices/Siri.app."
-    for plist in "$SIRI_ICON_INFO" "$core_info"; do
-      run_root /usr/libexec/PlistBuddy -c 'Set :CFBundleIconName AppIcon' "$plist" 2>/dev/null || \
-        run_root /usr/libexec/PlistBuddy -c 'Add :CFBundleIconName string AppIcon' "$plist"
-      run_root /usr/libexec/PlistBuddy -c 'Set :CFBundleIconFile AppIcon' "$plist" 2>/dev/null || \
-        run_root /usr/libexec/PlistBuddy -c 'Add :CFBundleIconFile string AppIcon' "$plist"
-      plutil -lint "$plist"
-    done
-    run_root cp -p "$SIRI_ICON_SYSTEM_APPICON" "$SIRI_ICON_CORESERVICES_APPICON"
-    run_root chown root:wheel "$SIRI_ICON_CORESERVICES_APPICON"
-    run_root chmod 0644 "$SIRI_ICON_CORESERVICES_APPICON"
-
-    cp "$SIRI_ICON_INFO" "$backup_dir/SystemApplications.Siri.Info.plist.snapshot.after"
-    cp "$core_info" "$backup_dir/CoreServices.Siri.Info.plist.snapshot.after"
-    cp "$SIRI_ICON_CORESERVICES_APPICON" "$backup_dir/CoreServices.Siri.AppIcon.icns.snapshot.after"
-
-    echo "Creating new boot snapshot..."
-    run_root bless --mount "$SIRI_ICON_MNT" --create-snapshot --setBoot
-    echo "Reboot is required for the modified system snapshot to become the live root."
-  else
-    echo "Siri source icons already match. No sealed System snapshot edit is needed."
-  fi
-
+  echo
+  echo "AOSUI/iCloud asks for com.apple.siri. On a working system, IconServices"
+  echo "aliases that app icon to Apple's built-in content type:"
+  echo "  com.apple.application-icon.siri-intelligence"
+  echo "No generated image or copied .icns is used here."
+  echo
+  echo "Refreshing LaunchServices/IconServices caches..."
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -kill -r -domain local -domain system -domain user >/dev/null 2>&1 || true
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$SIRI_SYSTEM_APP" || true
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$SIRI_CORESERVICES_APP" || true
   /usr/bin/mdimport "$SIRI_SYSTEM_APP" || true
   /usr/bin/mdimport "$SIRI_CORESERVICES_APP" || true
   /usr/bin/qlmanage -r cache >/dev/null 2>&1 || true
   killall iconservicesagent IconServicesAgent Dock "System Settings" AppleIDSettings cfprefsd 2>/dev/null || true
+
+  if /usr/bin/swift - > "$probe_log" <<'SWIFT'
+import AppKit
+
+let paths = [
+    "/System/Library/CoreServices/Siri.app",
+    "/System/Applications/Siri.app"
+]
+
+var ok = false
+for path in paths {
+    let image = NSWorkspace.shared.icon(forFile: path)
+    let text = String(describing: image)
+    print("provider icon for \(path): \(text)")
+    if text.contains("com.apple.application-icon.siri-intelligence") {
+        ok = true
+    }
+}
+
+exit(ok ? 0 : 2)
+SWIFT
+  then
+    :
+  else
+    true
+  fi
+  cat "$probe_log"
+  if ! grep -q 'com.apple.application-icon.siri-intelligence' "$probe_log"; then
+    echo
+    echo "WARNING: IconServices did not report the Siri Apple Intelligence type."
+    echo "Do not replace icons by hand. First verify Apple Intelligence availability"
+    echo "and rerun after reboot/login."
+  fi
 
   echo "Backup: $backup_dir"
 }
@@ -1359,6 +1329,7 @@ uninstall_backup_state() {
   uninstall_backup_path "$LOADER_PLIST"
   uninstall_backup_path "$SIRI_LOCATION_FIX_DIR"
   uninstall_backup_path "$SIRI_LOCATION_FIX_AGENT"
+  uninstall_backup_path "$APPLEID_SETTINGS_SIRI_PREF"
   uninstall_backup_path "$ELIGIBILITYD_PLIST"
   uninstall_backup_path "$OS_ELIGIBILITY_PLIST"
 
@@ -1432,6 +1403,7 @@ uninstall_clear_user_defaults() {
   uninstall_run defaults delete com.apple.gms.availability 2>/dev/null || true
   uninstall_run defaults delete com.apple.siri.generativeassistantsettings isEnabled 2>/dev/null || true
   uninstall_run defaults delete com.apple.assistant.backedup SiriAvailability 2>/dev/null || true
+  uninstall_run rm -f "$APPLEID_SETTINGS_SIRI_PREF"
 }
 
 uninstall_restart_services() {
@@ -1553,5 +1525,5 @@ final_hints
 echo
 echo "Done. Reopen System Settings > Apple Intelligence & Siri and test Writing Tools, Image Playground, Photos Clean Up."
 if [[ "$DO_ICON_FIX" == "1" ]]; then
-  echo "Because --fix-siri-icon/--all was used, reboot before judging the Siri icon in Launchpad."
+  echo "Because --fix-siri-icon/--all was used, close and reopen System Settings/Launchpad after IconServices refresh."
 fi

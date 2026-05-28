@@ -190,12 +190,33 @@ tools/CodexRegionSpoof.kext
   CFBundleIconName = AppIcon
 
 /System/Library/CoreServices/Siri.app
-  AppIcon.icns = 和 /System/Applications/Siri.app/Contents/Resources/AppIcon.icns 相同
+  被 AOSUI / iCloud 的 com.apple.siri identity 使用
+
+IconServices
+  com.apple.siri -> com.apple.application-icon.siri-intelligence
 ```
 
-Launchpad / Menu Bar 通常讀 `/System/Applications/Siri.app`。但 iCloud「See All」、AOSUI 列表和一些隱私列表仍會從 `com.apple.siri` 解析到 `/System/Library/CoreServices/Siri.app`。所以只刷新 LaunchServices 不夠，永久修正需要把 CoreServices Siri.app 的 AppIcon 源也換成現代 Siri 圖標。
+Launchpad / Menu Bar 通常讀 `/System/Applications/Siri.app`。但 iCloud「See All」、AOSUI 列表和一些隱私列表仍會從 `com.apple.siri` 解析到 `/System/Library/CoreServices/Siri.app`。正確路徑不是自己生成或覆蓋圖標，而是讓 IconServices 把 Siri app icon alias 到 Apple 內置的 `com.apple.application-icon.siri-intelligence`。腳本只刷新 LaunchServices / IconServices 緩存並驗證這條 alias，不替換 `.icns`。
 
-如果兩個 AppIcon 不一致，腳本會提示需要修改 sealed system snapshot。這一步需先在 Recovery 裡關閉 authenticated-root，修復並建立新 snapshot 後重啟。重新開啟 authenticated-root 會回到 Apple 簽名的原始 sealed snapshot，這個源頭圖標修改會消失。
+iCloud「See All」還有一個更隱蔽的點：`AppleIDSettings.appex` 是 sandboxed Extension，`NSHomeDirectory()` 指向：
+
+```text
+~/Library/Containers/com.apple.systempreferences.AppleIDSettings/Data
+```
+
+所以它讀不到普通用戶域裡的：
+
+```text
+~/Library/Preferences/com.apple.assistant.backedup.plist
+```
+
+如果這個容器裡沒有同一份 `SiriAvailability`，AOSUI 進程內就不會把 `com.apple.siri` alias 到 Apple Intelligence 圖標。腳本會把 `SiriAvailability` 鏡像到：
+
+```text
+~/Library/Containers/com.apple.systempreferences.AppleIDSettings/Data/Library/Preferences/com.apple.assistant.backedup.plist
+```
+
+這不是改 UI 圖片，而是讓 AppleIDSettings 讀到和系統其它進程一致的 AI availability 狀態。
 
 Location Services 裡 Siri 圖標是另一條路徑：它的權限身份是 `AssistantServices.framework`，但顯示圖標應該取 `/System/Applications/Siri.app`。主腳本會把這個 locationd runtime 修正合入既有的 `load-region-spoof.sh` 開機流程。
 
@@ -395,7 +416,7 @@ com.apple.systemuiserver menuExtras = /System/Library/CoreServices/Siri.bundle
 ./enable_apple_intelligence_oneclick.sh --all
 ```
 
-然後重啟或重新登入。這一步會檢查 `/System/Applications/Siri.app` 和 `/System/Library/CoreServices/Siri.app` 的圖標源是否一致。如果 CoreServices 的 `AppIcon.icns` 還是舊圖標，腳本會要求先關閉 authenticated-root，因為這是 sealed System volume 內的源頭文件。
+然後重啟或重新登入。這一步會刷新 LaunchServices / IconServices，鏡像 `SiriAvailability` 到 AppleIDSettings 容器，並檢查 `NSWorkspace` 是否把 Siri app icon 解析為 `com.apple.application-icon.siri-intelligence`。如果 iCloud 彈窗仍顯示舊圖標，先關閉 System Settings 再重新打開，因為 AppleIDSettings/AOSUI 會在進程內緩存 service row icon。
 
 ### 5. Maps 定位按鈕沒反應
 
