@@ -10,6 +10,7 @@ DO_LOAD_KEXT=1
 DO_ELIGIBILITY=1
 DO_SAE=1
 DO_LOCATION_IP_FIX=1
+FORCE_GEOSERVICES_US=0
 DO_SIRI_LOCATION_ICON_RUNTIME_FIX=1
 DO_WEB_SEARCH_FIX=1
 DO_VERIFY_ONLY=0
@@ -39,6 +40,12 @@ SIRI_PREF="$HOME/Library/Preferences/${SIRI_DOMAIN}.plist"
 SIRI_ICON_MNT="/private/tmp/codex_system_rw"
 SIRI_ICON_DEVICE="/dev/disk3s5"
 SIRI_ICON_INFO="${SIRI_ICON_MNT}/System/Applications/Siri.app/Contents/Info.plist"
+SIRI_SYSTEM_APP="/System/Applications/Siri.app"
+SIRI_CORESERVICES_APP="/System/Library/CoreServices/Siri.app"
+SIRI_ICON_SYSTEM_APP="${SIRI_ICON_MNT}/System/Applications/Siri.app"
+SIRI_ICON_CORESERVICES_APP="${SIRI_ICON_MNT}/System/Library/CoreServices/Siri.app"
+SIRI_ICON_SYSTEM_APPICON="${SIRI_ICON_SYSTEM_APP}/Contents/Resources/AppIcon.icns"
+SIRI_ICON_CORESERVICES_APPICON="${SIRI_ICON_CORESERVICES_APP}/Contents/Resources/AppIcon.icns"
 
 ELIGIBILITYD_DOMAINS=(
   OS_ELIGIBILITY_DOMAIN_GREYMATTER
@@ -62,10 +69,10 @@ Usage:
   ./enable_apple_intelligence_oneclick.sh [options]
 
 Options:
-  --all                 Run core enable steps and refresh the Siri Launchpad icon registration.
-  --fix-siri-icon       Refresh Siri Launchpad icon registration only.
-                        Only needs authenticated-root disabled if the sealed
-                        Siri.app Info.plist was previously damaged.
+  --all                 Run core enable steps and patch the durable Siri icon source.
+  --fix-siri-icon       Patch the durable Siri icon source only.
+                        Needs authenticated-root disabled when CoreServices/Siri.app
+                        still has the old AppIcon source.
   --verify-only         Only print current state; do not change anything.
   --uninstall           Back up local state, remove kext/LaunchDaemon, clear forced caches.
   --dry-run             With --uninstall, print restore actions without changing anything.
@@ -74,6 +81,9 @@ Options:
   --skip-eligibility    Do not patch eligibility plists.
   --skip-sae            Do not force Siri SAE orchestration preference.
   --skip-location-ip    Do not set GeoServices location country from public IP.
+  --force-geoservices-us
+                        Force GeoServices location country cache to US instead
+                        of using the current public IP exit country.
   --skip-siri-location-icon
                         Do not integrate the Location Services Siri icon runtime fix.
   --skip-web-search     Do not normalize the Siri/Safari web search provider to Google.
@@ -93,10 +103,11 @@ What this single script does:
   - patches Apple Intelligence eligibility domains to answer_t = 4
   - forces Siri SAE orchestration mode
   - sets GeoServices location country from the current public IP exit country
+    or forces it to US with --force-geoservices-us
   - integrates the Location Services Siri icon fix into load-region-spoof.sh
   - normalizes the Siri/Safari web search provider to Google
   - refreshes affected availability clients
-  - optionally refreshes Siri Launchpad icon registration
+  - optionally patches the sealed Siri icon source used by com.apple.siri
 
 Core steps use normal sudo prompting. The Siri Location Services icon runtime
 fix is applied once now and then re-applied by the existing boot-time
@@ -167,6 +178,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-location-ip|--skip-location-cn)
       DO_LOCATION_IP_FIX=0
+      ;;
+    --force-geoservices-us|--force-location-us|--force-geo-us)
+      DO_LOCATION_IP_FIX=1
+      FORCE_GEOSERVICES_US=1
       ;;
     --skip-siri-location-icon)
       DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
@@ -440,6 +455,7 @@ SIRI_FIX_DIR="/Library/Scripts/Codex/SiriLocationIconFix"
 SIRI_LOCATIOND_PATCH="$SIRI_FIX_DIR/patch_locationd_skip_assistantd_association_lldb.py"
 ASSISTANTD_PLIST="/System/Library/LaunchAgents/com.apple.assistantd.plist"
 CLIENTS_PLIST="/var/db/locationd/clients.plist"
+FORCE_GEOSERVICES_US="__CODEX_FORCE_GEOSERVICES_US__"
 
 console_user() {
   /usr/bin/stat -f '%Su' /dev/console 2>/dev/null || true
@@ -584,13 +600,22 @@ apply_siri_location_icon_fix() {
   echo "restarting AI availability daemons"
   /usr/bin/killall eligibilityd generativeexperiencesd modelcatalogd 2>/dev/null || true
 
-  echo "setting GeoServices location country cache from public IP"
+  SOURCE_NOTE="set from current public IP geolocation"
   GEO_CC=""
   GEO_IP=""
   GEO_CITY=""
   GEO_REGION=""
   GEO_LOC=""
-  if /usr/bin/curl -s --max-time 8 https://ipinfo.io/json >/tmp/codex_geo_ip.json 2>/dev/null; then
+  if [ "$FORCE_GEOSERVICES_US" = "1" ]; then
+    GEO_CC="US"
+    GEO_IP="forced"
+    GEO_CITY="forced"
+    GEO_REGION="forced"
+    GEO_LOC="forced"
+    SOURCE_NOTE="forced to US by --force-geoservices-us"
+    echo "forcing GeoServices location country cache to US"
+  elif /usr/bin/curl -s --max-time 8 https://ipinfo.io/json >/tmp/codex_geo_ip.json 2>/dev/null; then
+    echo "setting GeoServices location country cache from public IP"
     GEO_CC="$(/usr/bin/python3 -c 'import json,sys; print((json.load(open("/tmp/codex_geo_ip.json")).get("country") or "").upper())' 2>/dev/null || true)"
     GEO_IP="$(/usr/bin/python3 -c 'import json; print(json.load(open("/tmp/codex_geo_ip.json")).get("ip",""))' 2>/dev/null || true)"
     GEO_CITY="$(/usr/bin/python3 -c 'import json; print(json.load(open("/tmp/codex_geo_ip.json")).get("city",""))' 2>/dev/null || true)"
@@ -606,16 +631,16 @@ apply_siri_location_icon_fix() {
     echo "public IP lookup failed; falling back to GeoServices country US"
   fi
   /bin/mkdir -p /var/db/locationd/Library/Caches/GeoServices
-  /usr/bin/python3 - "$GEO_CC" "$GEO_IP" "$GEO_CITY" "$GEO_REGION" "$GEO_LOC" <<'PY'
+  /usr/bin/python3 - "$GEO_CC" "$GEO_IP" "$GEO_CITY" "$GEO_REGION" "$GEO_LOC" "$SOURCE_NOTE" <<'PY'
 import plistlib
 import sys
 
-cc, ip, city, region, loc = sys.argv[1:6]
+cc, ip, city, region, loc, source_note = sys.argv[1:7]
 payload = {
     "DeviceCountryCodeSourced": {
         "cc": cc,
         "metadata": {
-            "sourceNote": "set from current public IP geolocation",
+            "sourceNote": source_note,
             "ip": ip,
             "city": city,
             "region": region,
@@ -636,6 +661,7 @@ PY
 
 exit 0
 EOF
+  /usr/bin/perl -0pi -e "s/__CODEX_FORCE_GEOSERVICES_US__/${FORCE_GEOSERVICES_US}/g" "$tmp_script"
   run_root install -o root -g wheel -m 755 "$tmp_script" "$LOADER_SCRIPT"
   rm -f "$tmp_script"
 
@@ -862,6 +888,15 @@ force_siri_sae_orchestration_mode() {
 
 detect_public_ip_geo() {
   local json cc ip city region loc
+  if [[ "${FORCE_GEOSERVICES_US:-0}" == "1" ]]; then
+    GEO_IP_CC="US"
+    GEO_IP_ADDR="forced"
+    GEO_IP_CITY="forced"
+    GEO_IP_REGION="forced"
+    GEO_IP_LOC="forced"
+    return 0
+  fi
+
   json="$(/usr/bin/curl -s --max-time 8 https://ipinfo.io/json 2>/dev/null || true)"
   if [[ -n "$json" ]]; then
     cc="$(printf '%s' "$json" | /usr/bin/python3 -c 'import json,sys; print((json.load(sys.stdin).get("country") or "").upper())' 2>/dev/null || true)"
@@ -879,8 +914,12 @@ detect_public_ip_geo() {
 }
 
 pin_geoservices_location_country_from_ip() {
-  section "Set GeoServices location country from public IP"
+  section "Set GeoServices location country"
   detect_public_ip_geo
+  local source_note="set from current public IP geolocation"
+  if [[ "${FORCE_GEOSERVICES_US:-0}" == "1" ]]; then
+    source_note="forced to US by --force-geoservices-us"
+  fi
 
   local backup_dir="/private/var/db/locationd_cache_backup/geo-ip-${GEO_IP_CC}-$(date +%Y%m%d-%H%M%S)"
 
@@ -892,16 +931,16 @@ pin_geoservices_location_country_from_ip() {
 
   local tmp_store
   tmp_store="$(mktemp)"
-  /usr/bin/python3 - "$tmp_store" "$GEO_IP_CC" "$GEO_IP_ADDR" "$GEO_IP_CITY" "$GEO_IP_REGION" "$GEO_IP_LOC" <<'PY'
+  /usr/bin/python3 - "$tmp_store" "$GEO_IP_CC" "$GEO_IP_ADDR" "$GEO_IP_CITY" "$GEO_IP_REGION" "$GEO_IP_LOC" "$source_note" <<'PY'
 import plistlib
 import sys
 
-path, cc, ip, city, region, loc = sys.argv[1:7]
+path, cc, ip, city, region, loc, source_note = sys.argv[1:8]
 payload = {
     "DeviceCountryCodeSourced": {
         "cc": cc,
         "metadata": {
-            "sourceNote": "set from current public IP geolocation",
+            "sourceNote": source_note,
             "ip": ip,
             "city": city,
             "region": region,
@@ -916,14 +955,18 @@ PY
   run_root install -o _locationd -g _locationd -m 0644 "$tmp_store" "$GEOSERVICES_DIRECT_STORE"
   rm -f "$tmp_store"
 
-  echo "Detected public IP country: ${GEO_IP_CC} (${GEO_IP_ADDR}, ${GEO_IP_CITY}, ${GEO_IP_REGION}, ${GEO_IP_LOC})"
+  if [[ "${FORCE_GEOSERVICES_US:-0}" == "1" ]]; then
+    echo "Forced GeoServices country: ${GEO_IP_CC}"
+  else
+    echo "Detected public IP country: ${GEO_IP_CC} (${GEO_IP_ADDR}, ${GEO_IP_CITY}, ${GEO_IP_REGION}, ${GEO_IP_LOC})"
+  fi
   echo "-- GeoServices DirectReadConfigStore --"
   run_root plutil -p "$GEOSERVICES_DIRECT_STORE" 2>/dev/null || true
 
   killall Maps Weather 2>/dev/null || true
   killall CoreLocationAgent 2>/dev/null || true
   run_root killall locationd geod routined 2>/dev/null || true
-  echo "Set location country cache from public IP. Reopen Maps/Weather and test current location."
+  echo "Set GeoServices location country cache. Reopen Maps/Weather and test current location."
 }
 
 force_web_search_provider_google() {
@@ -1173,30 +1216,61 @@ find_system_volume_device() {
 }
 
 patch_siri_launchpad_icon_source() {
-  section "Refresh Siri Launchpad icon registration"
-  local backup_dir="$HOME/Documents/Codex/siri-launchpad-icon-backups/$(date +%Y%m%d-%H%M%S)"
-  local sys_dev
+  section "Patch Siri icon source used by com.apple.siri"
+  local backup_dir="$HOME/Documents/Codex/siri-icon-source-backups/$(date +%Y%m%d-%H%M%S)"
+  local sys_dev core_info system_hash core_hash needs_snapshot_edit=0
 
   mkdir -p "$backup_dir"
-  cp /System/Applications/Siri.app/Contents/Info.plist "$backup_dir/SystemApplications.Siri.Info.plist.live" 2>/dev/null || true
-  cp /System/Library/CoreServices/Siri.app/Contents/Info.plist "$backup_dir/CoreServices.Siri.Info.plist.live" 2>/dev/null || true
+  cp "$SIRI_SYSTEM_APP/Contents/Info.plist" "$backup_dir/SystemApplications.Siri.Info.plist.live" 2>/dev/null || true
+  cp "$SIRI_CORESERVICES_APP/Contents/Info.plist" "$backup_dir/CoreServices.Siri.Info.plist.live" 2>/dev/null || true
+  cp "$SIRI_SYSTEM_APP/Contents/Resources/AppIcon.icns" "$backup_dir/SystemApplications.Siri.AppIcon.icns.live" 2>/dev/null || true
+  cp "$SIRI_CORESERVICES_APP/Contents/Resources/AppIcon.icns" "$backup_dir/CoreServices.Siri.AppIcon.icns.live" 2>/dev/null || true
 
-  echo "-- Live Launchpad Siri registration source --"
-  /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' /System/Applications/Siri.app/Contents/Info.plist 2>/dev/null || true
-  /usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' /System/Applications/Siri.app/Contents/Info.plist 2>/dev/null || true
-  /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' /System/Applications/Siri.app/Contents/Info.plist 2>/dev/null || true
+  echo "-- Live Siri identity sources --"
+  echo "User-facing Siri app:"
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$SIRI_SYSTEM_APP/Contents/Info.plist" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$SIRI_SYSTEM_APP/Contents/Info.plist" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$SIRI_SYSTEM_APP/Contents/Info.plist" 2>/dev/null || true
+  echo "Legacy service Siri app still used by AOSUI/iCloud lists:"
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$SIRI_CORESERVICES_APP/Contents/Info.plist" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$SIRI_CORESERVICES_APP/Contents/Info.plist" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$SIRI_CORESERVICES_APP/Contents/Info.plist" 2>/dev/null || true
 
-  if ! /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' /System/Applications/Siri.app/Contents/Info.plist 2>/dev/null | grep -qx 'AppIcon'; then
+  system_hash="$(shasum -a 256 "$SIRI_SYSTEM_APP/Contents/Resources/AppIcon.icns" 2>/dev/null | awk '{print $1}')"
+  core_hash="$(shasum -a 256 "$SIRI_CORESERVICES_APP/Contents/Resources/AppIcon.icns" 2>/dev/null | awk '{print $1}')"
+  echo "System/Applications Siri AppIcon: ${system_hash:-missing}"
+  echo "CoreServices Siri AppIcon:        ${core_hash:-missing}"
+
+  if [[ -z "$system_hash" || -z "$core_hash" || "$system_hash" != "$core_hash" ]]; then
+    needs_snapshot_edit=1
+    echo "CoreServices Siri.app has a different AppIcon; iCloud/AOSUI can still show the old Siri icon."
+  fi
+  if ! /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$SIRI_SYSTEM_APP/Contents/Info.plist" 2>/dev/null | grep -qx 'AppIcon'; then
+    needs_snapshot_edit=1
+    echo "User-facing Siri.app CFBundleIconName is not AppIcon and must be repaired."
+  fi
+  if ! /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$SIRI_CORESERVICES_APP/Contents/Info.plist" 2>/dev/null | grep -qx 'AppIcon'; then
+    needs_snapshot_edit=1
+    echo "CoreServices Siri.app CFBundleIconName is not AppIcon and must be repaired."
+  fi
+
+  if [[ "$needs_snapshot_edit" == "1" ]]; then
     if ! csrutil authenticated-root status 2>/dev/null | grep -qi 'disabled'; then
       cat >&2 <<'MSG'
-The live /System/Applications/Siri.app is missing CFBundleIconName=AppIcon,
-but Authenticated Root is enabled so the sealed System volume cannot be fixed.
+The source icon still needs a sealed System snapshot edit, but Authenticated
+Root is enabled and the live root is sealed/read-only.
 
-Boot Recovery, run:
+For the permanent Siri/iCloud icon-source fix, boot Recovery and run:
 
   csrutil authenticated-root disable
 
-Then boot macOS and rerun this script with --fix-siri-icon or --all.
+Then boot macOS and rerun:
+
+  ./enable_apple_intelligence_oneclick.sh --fix-siri-icon
+
+After it creates the new snapshot and you reboot, iCloud > See All and other
+AOSUI consumers of com.apple.siri should resolve the same modern Siri icon
+source as Launchpad/Menu Bar.
 MSG
       exit 1
     fi
@@ -1207,33 +1281,48 @@ MSG
       run_root mount -t apfs -o nobrowse,rw "$sys_dev" "$SIRI_ICON_MNT"
     fi
 
-    if [[ ! -f "$SIRI_ICON_INFO" ]]; then
-      echo "Missing Siri Info.plist at $SIRI_ICON_INFO" >&2
+    core_info="${SIRI_ICON_CORESERVICES_APP}/Contents/Info.plist"
+    if [[ ! -f "$SIRI_ICON_INFO" || ! -f "$core_info" || ! -f "$SIRI_ICON_SYSTEM_APPICON" ]]; then
+      echo "Missing mounted Siri files under $SIRI_ICON_MNT" >&2
       exit 1
     fi
 
-    cp "$SIRI_ICON_INFO" "$backup_dir/Siri.Info.plist.snapshot.before"
-    echo "Restoring CFBundleIconName=AppIcon so IconServices uses the modern Assets.car icon stack..."
-    run_root /usr/libexec/PlistBuddy -c 'Set :CFBundleIconName AppIcon' "$SIRI_ICON_INFO" 2>/dev/null || \
-      run_root /usr/libexec/PlistBuddy -c 'Add :CFBundleIconName string AppIcon' "$SIRI_ICON_INFO"
-    run_root /usr/libexec/PlistBuddy -c 'Set :CFBundleIconFile AppIcon' "$SIRI_ICON_INFO" 2>/dev/null || \
-      run_root /usr/libexec/PlistBuddy -c 'Add :CFBundleIconFile string AppIcon' "$SIRI_ICON_INFO"
-    plutil -lint "$SIRI_ICON_INFO"
-    cp "$SIRI_ICON_INFO" "$backup_dir/Siri.Info.plist.snapshot.after"
+    cp "$SIRI_ICON_INFO" "$backup_dir/SystemApplications.Siri.Info.plist.snapshot.before"
+    cp "$core_info" "$backup_dir/CoreServices.Siri.Info.plist.snapshot.before"
+    cp "$SIRI_ICON_SYSTEM_APPICON" "$backup_dir/SystemApplications.Siri.AppIcon.icns.snapshot.before" 2>/dev/null || true
+    cp "$SIRI_ICON_CORESERVICES_APPICON" "$backup_dir/CoreServices.Siri.AppIcon.icns.snapshot.before" 2>/dev/null || true
+
+    echo "Repairing Siri icon source:"
+    echo "  1. Keep both Siri.app Info.plist icon keys at AppIcon."
+    echo "  2. Copy the modern /System/Applications/Siri.app AppIcon.icns to CoreServices/Siri.app."
+    for plist in "$SIRI_ICON_INFO" "$core_info"; do
+      run_root /usr/libexec/PlistBuddy -c 'Set :CFBundleIconName AppIcon' "$plist" 2>/dev/null || \
+        run_root /usr/libexec/PlistBuddy -c 'Add :CFBundleIconName string AppIcon' "$plist"
+      run_root /usr/libexec/PlistBuddy -c 'Set :CFBundleIconFile AppIcon' "$plist" 2>/dev/null || \
+        run_root /usr/libexec/PlistBuddy -c 'Add :CFBundleIconFile string AppIcon' "$plist"
+      plutil -lint "$plist"
+    done
+    run_root cp -p "$SIRI_ICON_SYSTEM_APPICON" "$SIRI_ICON_CORESERVICES_APPICON"
+    run_root chown root:wheel "$SIRI_ICON_CORESERVICES_APPICON"
+    run_root chmod 0644 "$SIRI_ICON_CORESERVICES_APPICON"
+
+    cp "$SIRI_ICON_INFO" "$backup_dir/SystemApplications.Siri.Info.plist.snapshot.after"
+    cp "$core_info" "$backup_dir/CoreServices.Siri.Info.plist.snapshot.after"
+    cp "$SIRI_ICON_CORESERVICES_APPICON" "$backup_dir/CoreServices.Siri.AppIcon.icns.snapshot.after"
 
     echo "Creating new boot snapshot..."
     run_root bless --mount "$SIRI_ICON_MNT" --create-snapshot
     echo "Reboot is required for the modified system snapshot to become the live root."
   else
-    echo "CFBundleIconName=AppIcon is already present; no sealed System snapshot edit is needed."
+    echo "Siri source icons already match. No sealed System snapshot edit is needed."
   fi
 
-  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /System/Applications/Siri.app || true
-  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /System/Library/CoreServices/Siri.app || true
-  /usr/bin/mdimport /System/Applications/Siri.app || true
-  /usr/bin/mdimport /System/Library/CoreServices/Siri.app || true
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$SIRI_SYSTEM_APP" || true
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$SIRI_CORESERVICES_APP" || true
+  /usr/bin/mdimport "$SIRI_SYSTEM_APP" || true
+  /usr/bin/mdimport "$SIRI_CORESERVICES_APP" || true
   /usr/bin/qlmanage -r cache >/dev/null 2>&1 || true
-  killall iconservicesagent IconServicesAgent Dock 2>/dev/null || true
+  killall iconservicesagent IconServicesAgent Dock "System Settings" AppleIDSettings cfprefsd 2>/dev/null || true
 
   echo "Backup: $backup_dir"
 }

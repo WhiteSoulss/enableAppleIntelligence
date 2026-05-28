@@ -58,6 +58,12 @@ DeviceCountryCodeSourced.cc = <current public IP country>
 
 這不會把 IORegistry 改回中國 SKU，只是讓地圖定位使用與當前網絡出口更一致的 GeoServices 配置。
 
+如果想不看出口 IP、固定把 GeoServices 定位國家寫成美國，可以加：
+
+```bash
+./enable_apple_intelligence_oneclick.sh --force-geoservices-us
+```
+
 ## 文件
 
 ```text
@@ -177,16 +183,19 @@ tools/CodexRegionSpoof.kext
 ./enable_apple_intelligence_oneclick.sh --fix-siri-icon
 ```
 
-目前正確狀態是：
+目前正確狀態有兩層：
 
 ```text
 /System/Applications/Siri.app
   CFBundleIconName = AppIcon
+
+/System/Library/CoreServices/Siri.app
+  AppIcon.icns = 和 /System/Applications/Siri.app/Contents/Resources/AppIcon.icns 相同
 ```
 
-腳本會保留這個值，刷新 LaunchServices / IconServices / Spotlight 對 Siri.app 的註冊，讓系統使用 `/System/Applications/Siri.app` 的現代 AppIcon 資產。
+Launchpad / Menu Bar 通常讀 `/System/Applications/Siri.app`。但 iCloud「See All」、AOSUI 列表和一些隱私列表仍會從 `com.apple.siri` 解析到 `/System/Library/CoreServices/Siri.app`。所以只刷新 LaunchServices 不夠，永久修正需要把 CoreServices Siri.app 的 AppIcon 源也換成現代 Siri 圖標。
 
-只有在你之前跑過舊版圖標補丁、把 `CFBundleIconName` 刪掉或改壞時，腳本才會嘗試把它恢復為 `AppIcon`。這種修復會涉及 sealed system snapshot，需先在 Recovery 裡關閉 authenticated-root，修復後再重啟。
+如果兩個 AppIcon 不一致，腳本會提示需要修改 sealed system snapshot。這一步需先在 Recovery 裡關閉 authenticated-root，修復並建立新 snapshot 後重啟。重新開啟 authenticated-root 會回到 Apple 簽名的原始 sealed snapshot，這個源頭圖標修改會消失。
 
 Location Services 裡 Siri 圖標是另一條路徑：它的權限身份是 `AssistantServices.framework`，但顯示圖標應該取 `/System/Applications/Siri.app`。主腳本會把這個 locationd runtime 修正合入既有的 `load-region-spoof.sh` 開機流程。
 
@@ -208,7 +217,7 @@ Siri / Safari 的網頁搜索 provider 也是另一條鏈。主腳本會把全�
 
 5. 修改 Apple Intelligence 相關 eligibility domains。
 6. 將 Siri SAE orchestration mode 設成 `4`。
-7. 根據當前出口 IP 自動寫入 GeoServices 定位國家 cache。
+7. 根據當前出口 IP 自動寫入 GeoServices 定位國家 cache；如果加 `--force-geoservices-us`，則固定寫 `US`。
 8. 將 Location Services 裡 Siri 圖標的 runtime identity 修正合入 `load-region-spoof.sh`。
 9. 將 Siri / Safari web search provider 正規化為 Google，並清理 Safari RecentWebSearches 裡的舊 Baidu 條目。
 10. 重啟相關服務：
@@ -386,7 +395,7 @@ com.apple.systemuiserver menuExtras = /System/Library/CoreServices/Siri.bundle
 ./enable_apple_intelligence_oneclick.sh --all
 ```
 
-然後重啟或重新登入。這一步正常情況下只是刷新 Siri.app 的系統註冊；如果腳本提示 live `/System/Applications/Siri.app` 的 `CFBundleIconName` 不是 `AppIcon`，才代表你曾被舊方案改壞，需要用 authenticated-root disabled 的狀態修復 sealed snapshot。
+然後重啟或重新登入。這一步會檢查 `/System/Applications/Siri.app` 和 `/System/Library/CoreServices/Siri.app` 的圖標源是否一致。如果 CoreServices 的 `AppIcon.icns` 還是舊圖標，腳本會要求先關閉 authenticated-root，因為這是 sealed System volume 內的源頭文件。
 
 ### 5. Maps 定位按鈕沒反應
 
