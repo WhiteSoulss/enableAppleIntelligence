@@ -1311,7 +1311,7 @@ MSG
     cp "$SIRI_ICON_CORESERVICES_APPICON" "$backup_dir/CoreServices.Siri.AppIcon.icns.snapshot.after"
 
     echo "Creating new boot snapshot..."
-    run_root bless --mount "$SIRI_ICON_MNT" --create-snapshot
+    run_root bless --mount "$SIRI_ICON_MNT" --create-snapshot --setBoot
     echo "Reboot is required for the modified system snapshot to become the live root."
   else
     echo "Siri source icons already match. No sealed System snapshot edit is needed."
