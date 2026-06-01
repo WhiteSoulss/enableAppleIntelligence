@@ -239,9 +239,10 @@ Siri / Safari 的網頁搜索 provider 也是另一條鏈。主腳本會把全�
 5. 修改 Apple Intelligence 相關 eligibility domains。
 6. 將 Siri SAE orchestration mode 設成 `4`。
 7. 根據當前出口 IP 自動寫入 GeoServices 定位國家 cache；如果加 `--force-geoservices-us`，則固定寫 `US`。
-8. 將 Location Services 裡 Siri 圖標的 runtime identity 修正合入 `load-region-spoof.sh`。
-9. 將 Siri / Safari web search provider 正規化為 Google，並清理 Safari RecentWebSearches 裡的舊 Baidu 條目。
-10. 重啟相關服務：
+8. 合併 `kanshurichard/enableAppleAI` 方法二的 `countryd` cache 修正，把 `/private/var/db/com.apple.countryd/countryCodeCache.plist` 內的兩位國家碼固定為 `US` 並鎖定。
+9. 將 Location Services 裡 Siri 圖標的 runtime identity 修正合入 `load-region-spoof.sh`。
+10. 將 Siri / Safari web search provider 正規化為 Google，並清理 Safari RecentWebSearches 裡的舊 Baidu 條目。
+11. 重啟相關服務：
 
    ```text
    eligibilityd
@@ -257,9 +258,9 @@ Siri / Safari 的網頁搜索 provider 也是另一條鏈。主腳本會把全�
    cfprefsd
    ```
 
-11. 發送 availability / eligibility notification。
-12. 恢復 Siri menu bar extra。
-13. 如果使用 `--all`，刷新 Siri Launchpad 圖標註冊；只有在舊補丁破壞過 Siri.app Info.plist 時才需要修復 snapshot。
+12. 發送 availability / eligibility notification。
+13. 恢復 Siri menu bar extra。
+14. 如果使用 `--all`，刷新 Siri Launchpad 圖標註冊；只有在舊補丁破壞過 Siri.app Info.plist 時才需要修復 snapshot。
 
 ## Eligibility 修改內容
 
@@ -306,6 +307,24 @@ OS_ELIGIBILITY_INPUT_GENERATIVE_MODEL_SYSTEM = 3
 ```bash
 chflags uchg /private/var/db/eligibilityd/eligibility.plist
 chflags uchg /private/var/db/os_eligibility/eligibility.plist
+```
+
+## 方法二合併內容
+
+一鍵腳本已經合併 `kanshurichard/enableAppleAI` 方法二涉及的持久文件修改：
+
+```text
+/private/var/db/eligibilityd/eligibility.plist
+/private/var/db/os_eligibility/eligibility.plist
+/private/var/db/com.apple.countryd/countryCodeCache.plist
+```
+
+前兩個 eligibility plist 會被寫成 Apple Intelligence 相關 domain `answer_t = 4`。`countryCodeCache.plist` 會把兩位國家碼固定為 `US`，再設成只讀並加 `uchg`，避免 `countryd` 下一次刷新時把中國 SKU 的國家 cache 寫回來。
+
+如果只想跳過 `countryd` cache 修正，可以執行：
+
+```bash
+./enable_apple_intelligence_oneclick.sh --skip-countryd
 ```
 
 ## Siri SAE 修改內容
@@ -574,6 +593,7 @@ region-info = CH/A
 ```
 
 它會先備份目前狀態，再移除 kext / LaunchDaemon，解鎖並清除 eligibility cache，刪除用戶層 Apple Intelligence 強制 defaults，最後提示重啟。
+同時會解鎖 `countryCodeCache.plist`，但不直接刪除這個系統 cache，讓 `countryd` 後續自行刷新。
 
 手動還原步驟如下。
 

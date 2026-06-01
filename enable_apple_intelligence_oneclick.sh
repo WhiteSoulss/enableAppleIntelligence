@@ -10,6 +10,7 @@ DO_LOAD_KEXT=1
 DO_ELIGIBILITY=1
 DO_SAE=1
 DO_LOCATION_IP_FIX=1
+DO_COUNTRYD_US=1
 FORCE_GEOSERVICES_US=0
 DO_SIRI_LOCATION_ICON_RUNTIME_FIX=1
 DO_WEB_SEARCH_FIX=1
@@ -28,6 +29,8 @@ SIRI_LOCATION_FIX_DIR="/Library/Scripts/Codex/SiriLocationIconFix"
 SIRI_LOCATION_FIX_AGENT="$HOME/Library/LaunchAgents/local.codex.siri-location-icon-fix.plist"
 GEOSERVICES_DIR="/var/db/locationd/Library/Caches/GeoServices"
 GEOSERVICES_DIRECT_STORE="${GEOSERVICES_DIR}/DirectReadConfigStore.plist"
+COUNTRYD_PLIST="/private/var/db/com.apple.countryd/countryCodeCache.plist"
+COUNTRYD_BACKUP_BASE="/private/var/db/countryd_cache_backup"
 
 ELIGIBILITYD_PLIST="/private/var/db/eligibilityd/eligibility.plist"
 OS_ELIGIBILITY_PLIST="/private/var/db/os_eligibility/eligibility.plist"
@@ -78,6 +81,7 @@ Options:
   --force-geoservices-us
                         Force GeoServices location country cache to US instead
                         of using the current public IP exit country.
+  --skip-countryd       Do not apply the method-2 countryd US cache patch.
   --skip-siri-location-icon
                         Do not integrate the Location Services Siri icon runtime fix.
   --skip-web-search     Do not normalize the Siri/Safari web search provider to Google.
@@ -98,6 +102,8 @@ What this single script does:
   - forces Siri SAE orchestration mode
   - sets GeoServices location country from the current public IP exit country
     or forces it to US with --force-geoservices-us
+  - applies the method-2 countryd cache patch by forcing
+    /private/var/db/com.apple.countryd/countryCodeCache.plist to US
   - integrates the Location Services Siri icon fix into load-region-spoof.sh
   - normalizes the Siri/Safari web search provider to Google
   - refreshes affected availability clients
@@ -122,6 +128,7 @@ while [[ $# -gt 0 ]]; do
       DO_ELIGIBILITY=0
       DO_SAE=0
       DO_LOCATION_IP_FIX=0
+      DO_COUNTRYD_US=0
       DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
       DO_WEB_SEARCH_FIX=0
       ;;
@@ -132,6 +139,7 @@ while [[ $# -gt 0 ]]; do
       DO_ELIGIBILITY=0
       DO_SAE=0
       DO_LOCATION_IP_FIX=0
+      DO_COUNTRYD_US=0
       DO_ICON_FIX=0
       DO_WEB_SEARCH_FIX=0
       ;;
@@ -142,6 +150,7 @@ while [[ $# -gt 0 ]]; do
       DO_ELIGIBILITY=0
       DO_SAE=0
       DO_LOCATION_IP_FIX=0
+      DO_COUNTRYD_US=0
       DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
       DO_WEB_SEARCH_FIX=0
       DO_ICON_FIX=0
@@ -154,6 +163,7 @@ while [[ $# -gt 0 ]]; do
       DO_ELIGIBILITY=0
       DO_SAE=0
       DO_LOCATION_IP_FIX=0
+      DO_COUNTRYD_US=0
       DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
       DO_WEB_SEARCH_FIX=0
       DO_ICON_FIX=0
@@ -172,6 +182,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-location-ip|--skip-location-cn)
       DO_LOCATION_IP_FIX=0
+      ;;
+    --skip-countryd)
+      DO_COUNTRYD_US=0
       ;;
     --force-geoservices-us|--force-location-us|--force-geo-us)
       DO_LOCATION_IP_FIX=1
@@ -993,6 +1006,75 @@ PY
   echo "Set GeoServices location country cache. Reopen Maps/Weather and test current location."
 }
 
+force_countryd_us_cache() {
+  section "Force countryd country cache to US"
+
+  if [[ ! -e "$COUNTRYD_PLIST" ]]; then
+    echo "$COUNTRYD_PLIST not found; skipping countryd method-2 cache patch."
+    return 0
+  fi
+
+  local backup_dir="$COUNTRYD_BACKUP_BASE/force-us-$(date +%Y%m%d-%H%M%S)"
+  run_root mkdir -p "$backup_dir"
+  run_root cp -p "$COUNTRYD_PLIST" "$backup_dir/countryCodeCache.plist.before"
+  echo "Backup: $backup_dir/countryCodeCache.plist.before"
+
+  local patcher
+  patcher="$(mktemp)"
+  cat > "$patcher" <<'PY'
+import os
+import plistlib
+import sys
+
+path = sys.argv[1]
+with open(path, "rb") as f:
+    data = plistlib.load(f)
+
+changed = 0
+
+def force_us(value):
+    global changed
+    if isinstance(value, dict):
+        return {key: force_us(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [force_us(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(force_us(item) for item in value)
+    if isinstance(value, str) and len(value) == 2 and value.isalpha() and value.isupper():
+        if value != "US":
+            changed += 1
+        return "US"
+    return value
+
+data = force_us(data)
+tmp = f"{path}.codex-countryd-tmp"
+with open(tmp, "wb") as f:
+    plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
+
+stat = os.stat(path)
+os.chown(tmp, stat.st_uid, stat.st_gid)
+os.chmod(tmp, 0o644)
+os.replace(tmp, path)
+print(f"countryd two-letter country strings forced to US; changed={changed}")
+PY
+
+  run_root chflags nouchg "$COUNTRYD_PLIST" 2>/dev/null || true
+  run_root chmod 0644 "$COUNTRYD_PLIST" 2>/dev/null || true
+  run_root /usr/bin/python3 "$patcher" "$COUNTRYD_PLIST"
+  rm -f "$patcher"
+
+  run_root chmod 0444 "$COUNTRYD_PLIST" 2>/dev/null || true
+  run_root chflags uchg "$COUNTRYD_PLIST" 2>/dev/null || true
+
+  echo "-- countryd countryCodeCache snapshot --"
+  run_root plutil -p "$COUNTRYD_PLIST" 2>/dev/null |
+    grep -E 'CountryCode|=> "US"|=> US' |
+    head -40 || true
+
+  run_root killall countryd 2>/dev/null || true
+  echo "Applied method-2 countryd cache patch and locked countryCodeCache.plist."
+}
+
 force_web_search_provider_google() {
   section "Normalize Siri/Safari web search provider"
 
@@ -1332,6 +1414,7 @@ uninstall_backup_state() {
   uninstall_backup_path "$APPLEID_SETTINGS_SIRI_PREF"
   uninstall_backup_path "$ELIGIBILITYD_PLIST"
   uninstall_backup_path "$OS_ELIGIBILITY_PLIST"
+  uninstall_backup_path "$COUNTRYD_PLIST"
 
   if [[ "$DO_UNINSTALL_DRY_RUN" == "0" ]]; then
     {
@@ -1398,6 +1481,17 @@ uninstall_clear_eligibility_cache() {
   done
 }
 
+uninstall_unlock_countryd_cache() {
+  section "Unlock countryd country cache"
+  if [[ -e "$COUNTRYD_PLIST" ]]; then
+    uninstall_run_root chflags nouchg "$COUNTRYD_PLIST" 2>/dev/null || true
+    uninstall_run_root chmod 0644 "$COUNTRYD_PLIST" 2>/dev/null || true
+    echo "Unlocked $COUNTRYD_PLIST. The cache is not deleted; countryd may refresh it later."
+  else
+    echo "$COUNTRYD_PLIST not present"
+  fi
+}
+
 uninstall_clear_user_defaults() {
   section "Clear user-level Apple Intelligence force defaults"
   uninstall_run defaults delete com.apple.gms.availability 2>/dev/null || true
@@ -1428,7 +1522,7 @@ run_uninstall_restore() {
   section "Apple Intelligence uninstall / restore"
   echo "Workspace: $ROOT_DIR"
   echo "Dry run: $DO_UNINSTALL_DRY_RUN"
-  echo "This will remove the kext and clear forced eligibility caches. Reboot is required."
+  echo "This will remove the kext, clear forced eligibility caches, and unlock countryd cache. Reboot is required."
 
   if [[ "$DO_UNINSTALL_DRY_RUN" == "0" ]]; then
     sudo_keepalive_start
@@ -1438,6 +1532,7 @@ run_uninstall_restore() {
   uninstall_remove_launch_items
   uninstall_remove_kext
   uninstall_clear_eligibility_cache
+  uninstall_unlock_countryd_cache
   uninstall_clear_user_defaults
   uninstall_restart_services
   uninstall_print_final_state
@@ -1475,7 +1570,7 @@ if [[ "$DO_UNINSTALL" == "1" ]]; then
   exit 0
 fi
 
-if [[ "$DO_VERIFY_ONLY" == "0" && ( "$DO_LOAD_KEXT" == "1" || "$DO_INSTALL_LAUNCHDAEMON" == "1" || "$DO_ELIGIBILITY" == "1" || "$DO_LOCATION_IP_FIX" == "1" ) ]]; then
+if [[ "$DO_VERIFY_ONLY" == "0" && ( "$DO_LOAD_KEXT" == "1" || "$DO_INSTALL_LAUNCHDAEMON" == "1" || "$DO_ELIGIBILITY" == "1" || "$DO_LOCATION_IP_FIX" == "1" || "$DO_COUNTRYD_US" == "1" ) ]]; then
   section "sudo"
   echo "Requesting sudo once for kext/eligibility/system-snapshot operations..."
   sudo_keepalive_start
@@ -1495,6 +1590,15 @@ print_root_region_state
 
 if [[ "$DO_VERIFY_ONLY" == "1" ]]; then
   print_eligibility_answers
+  section "countryd countryCodeCache"
+  if [[ -e "$COUNTRYD_PLIST" ]]; then
+    ls -lO "$COUNTRYD_PLIST" 2>/dev/null || true
+    run_root plutil -p "$COUNTRYD_PLIST" 2>/dev/null |
+      grep -E 'CountryCode|=> "US"|=> US' |
+      head -40 || true
+  else
+    echo "$COUNTRYD_PLIST not present"
+  fi
   section "SiriAvailability"
   defaults read "$SIRI_DOMAIN" "$SIRI_KEY" 2>/dev/null || true
   final_hints
@@ -1506,6 +1610,7 @@ fi
 [[ "$DO_ELIGIBILITY" == "1" ]] && patch_eligibility_domains
 [[ "$DO_SAE" == "1" ]] && force_siri_sae_orchestration_mode
 [[ "$DO_LOCATION_IP_FIX" == "1" ]] && pin_geoservices_location_country_from_ip
+[[ "$DO_COUNTRYD_US" == "1" ]] && force_countryd_us_cache
 [[ "$DO_WEB_SEARCH_FIX" == "1" ]] && force_web_search_provider_google
 [[ "$DO_SIRI_LOCATION_ICON_RUNTIME_FIX" == "1" ]] && install_siri_location_icon_runtime_fix
 
