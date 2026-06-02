@@ -467,7 +467,64 @@ Weather
 ./enable_apple_intelligence_oneclick.sh --skip-location-ip
 ```
 
-### 6. 成功後如何恢復比較高安全狀態
+### 6. Software Update 提示 snapshot 不一致
+
+如果升級 macOS 時看到類似提示：
+
+```text
+A snapshot is currently set to boot that is not the currently booted snapshot.
+Reboot to boot to the new snapshot to allow installation to this volume.
+```
+
+先直接重啟一次：
+
+```bash
+sudo reboot
+```
+
+如果重啟後仍然出現同樣提示，再手動讓系統回到 Apple 的 last sealed snapshot：
+
+```bash
+sudo bless --mount / --last-sealed-snapshot --setBoot
+sudo reboot
+```
+
+這條命令只用來修復 Software Update / SSV snapshot 狀態，不是啟用 Apple Intelligence 的必要步驟，所以不要把它當成日常流程反覆執行。
+
+執行後可以檢查：
+
+```bash
+diskutil info / | grep -E 'APFS Snapshot Name|APFS Snapshot UUID|Sealed'
+diskutil apfs listSnapshots /
+```
+
+理想狀態是：
+
+```text
+Sealed: Yes
+沒有 Will root to (boot from) another snapshot
+```
+
+注意：`bless --last-sealed-snapshot` 只影響 System Volume 的啟動 snapshot。它不會清掉 Data Volume / NVRAM 裡的狀態，例如：
+
+```text
+/Library/Extensions/CodexRegionSpoof.kext
+/Library/LaunchDaemons/local.codex.region-spoof-loader.plist
+/private/var/db/eligibilityd/eligibility.plist
+/private/var/db/os_eligibility/eligibility.plist
+/private/var/db/com.apple.countryd/countryCodeCache.plist
+NVRAM region-info
+```
+
+升級完成後再執行：
+
+```bash
+./enable_apple_intelligence_oneclick.sh --verify-only
+```
+
+如果 Apple Intelligence 狀態掉了，再重新執行一鍵腳本。
+
+### 7. 成功後如何恢復比較高安全狀態
 
 先完成一鍵腳本，確認 Apple Intelligence / Writing Tools / Image Playground / Photos Clean Up 已經可用，並確認底層值已經固定為：
 
