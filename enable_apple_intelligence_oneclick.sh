@@ -1,6 +1,8 @@
 #!/bin/zsh
 set -euo pipefail
 
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT_DIR"
 
@@ -322,7 +324,7 @@ macos_major_version() {
 
 find_system_volume_device() {
   local root_dev sys_dev
-  root_dev="$(mount | awk '$3 == "/" {print $1; exit}')"
+  root_dev="$(/sbin/mount | /usr/bin/awk '$3 == "/" {print $1; exit}')"
   if [[ -z "$root_dev" ]]; then
     echo "Could not determine root APFS snapshot device from mount output." >&2
     return 1
@@ -330,7 +332,7 @@ find_system_volume_device() {
 
   # On sealed-root macOS, / is usually mounted from a snapshot device such as
   # /dev/disk3s5s1. The writable System volume is the parent, /dev/disk3s5.
-  sys_dev="$(printf '%s' "$root_dev" | sed -E 's/(s[0-9]+)s[0-9]+$/\1/')"
+  sys_dev="$(printf '%s' "$root_dev" | /usr/bin/sed -E 's/(s[0-9]+)s[0-9]+$/\1/')"
   echo "$sys_dev"
 }
 
@@ -340,14 +342,14 @@ mount_system_volume_rw() {
   sys_dev="$(find_system_volume_device)"
 
   run_root mkdir -p "$mnt"
-  if mount | grep -q " on ${mnt} "; then
+  if /sbin/mount | /usr/bin/grep -q " on ${mnt} "; then
     return 0
   fi
 
   echo "Mounting System volume read-write:"
   echo "  device: $sys_dev"
   echo "  mount:  $mnt"
-  run_root mount -t apfs -o nobrowse,rw "$sys_dev" "$mnt"
+  run_root /sbin/mount -t apfs -o nobrowse,rw "$sys_dev" "$mnt"
 }
 
 apple_internal_variant_is_enabled() {
