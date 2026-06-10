@@ -140,7 +140,7 @@ SIP / authenticated-root
 Reduced Security
 第三方 kext
 /private/var/db/eligibilityd/*.plist
-sealed system snapshot（僅當 Siri.app 的 Info.plist 曾被舊方案改壞、需要恢復時）
+sealed system snapshot（macOS 27+ 的 AppleInternalVariant，或 Siri.app 的 Info.plist 曾被舊方案改壞、需要恢復時）
 ```
 
 你需要能接受：
@@ -586,7 +586,7 @@ region-info = LL/A
 目標狀態：
 
 ```text
-SIP: enabled
+SIP: 保持腳本要求的狀態，不要執行 csrutil enable
 Authenticated Root: enabled
 FileVault: on
 Startup Security: Reduced Security
@@ -595,6 +595,13 @@ Signed System Volume: Enabled
 ```
 
 這不是完整 Full Security。原因是本方案仍依賴 `CodexRegionSpoof.kext` 在開機時修正底層 IORegistry 身份；如果切回 Full Security，第三方 kext 很可能無法載入，下一次重啟後會回到中國 SKU 身份。
+
+成功後不要急著執行 `csrutil enable`。目前建議只恢復兩件事：
+
+```text
+1. csrutil authenticated-root enable
+2. 打開 FileVault
+```
 
 推薦流程：
 
@@ -611,12 +618,19 @@ Signed System Volume: Enabled
    "region-info" = <4c4c2f41...>   # LL/A
    ```
 
-2. 進 Recovery，把 SIP 和 authenticated-root 打開：
+2. 進 Recovery，只打開 authenticated-root：
+
+   ```bash
+   csrutil authenticated-root enable
+   ```
+
+   不要在這一步執行：
 
    ```bash
    csrutil enable
-   csrutil authenticated-root enable
    ```
+
+   因為本方案仍然需要開機載入第三方 kext。`csrutil enable` 可能讓 kext / 底層 spoof 鏈路失效。
 
 3. 仍然保留 Startup Security Utility 裡的：
 
@@ -650,7 +664,7 @@ Signed System Volume: Enabled
    理想結果：
 
    ```text
-   System Integrity Protection status: enabled.
+   System Integrity Protection status: disabled.    # 或保持腳本要求的狀態
    Authenticated Root status: enabled
    FileVault is On.
    Security Mode: Permissive / Reduced Security
@@ -676,6 +690,7 @@ region-info = CH/A
 
 ```text
 不要切回 Full Security
+不要執行 csrutil enable
 不要移除 CodexRegionSpoof.kext
 不要移除 /Library/LaunchDaemons/local.codex.region-spoof-loader.plist
 不要再跑舊的 LLDB / UI patch 腳本
