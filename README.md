@@ -698,6 +698,88 @@ region-info = CH/A
 
 如果未來 Apple 官方放開，或你不再需要這套修正，可以先移除 LaunchDaemon 和 kext，再考慮恢復 Full Security。
 
+### 8. 補充注意事項
+
+下面是目前在不同 macOS 26 / 27 測試機上觀察到的現象，遇到時按這個思路處理。
+
+#### Reduced Security / csrutil 狀態可能會互相牽動
+
+部分 macOS 版本裡，Startup Security Utility 的安全策略和 `csrutil` / `authenticated-root` 不是完全獨立的開關。可能會看到：
+
+```text
+Security Policy -> Reduced Security
+csrutil status -> enabled
+csrutil authenticated-root status -> enabled
+```
+
+也可能出現：手動把 `authenticated-root` 改回 `disable` 後，Security Policy 立即滑到 `Permissive`。
+
+這屬於 Apple 啟動安全策略的聯動行為，不一定是腳本失敗。成功後不要追求某一組固定的 `csrutil status` 字樣，重點看：
+
+```bash
+sudo bputil -d | grep -E 'Security Mode|3rd Party Kexts|Signed System Volume'
+ioreg -rd1 -c IOPlatformExpertDevice | grep -Ei 'region-info|country-of-origin'
+sudo kmutil showloaded | grep -Ei 'Codex|RegionSpoof'
+```
+
+只要下面幾點成立，通常就可以繼續測試：
+
+```text
+3rd Party Kexts: Enabled
+CodexRegionSpoof 已載入
+country-of-origin = USA
+region-info = LL/A
+```
+
+#### 第一次載入 kext 後可能需要手動允許
+
+如果你在 Recovery 裡關過 SIP / 改過安全策略，第一次回到 macOS 後，可能還需要到：
+
+```text
+System Settings
+  -> Privacy & Security
+  -> 滑到最下方
+  -> 允許被阻止的系統軟體 / 內核擴展
+```
+
+允許後通常還要再重啟一次。沒有完成這一步時，可能會出現「Apple Intelligence UI 已經出現，但 Siri AI / 相關模型功能仍然不可用」。
+
+#### 部分功能初始化後會走本地模型 / 本地資產
+
+Photos Clean Up、Writing Tools、Image Playground 等功能在資產下載完成後，很多路徑會走本地模型或本地快取。某些工具初始化成功一次後，即使之後調整 `csrutil` 狀態，短期內也可能仍然可用。
+
+但這不代表底層 spoof 已經不需要了。新進程、新系統服務、重啟後的 availability 判斷，仍然可能重新讀：
+
+```text
+IORegistry
+MobileGestalt
+eligibilityd
+generativeexperiencesd / modelcatalogd
+```
+
+所以最終仍以 `ioreg`、`kmutil showloaded` 和實際功能測試為準。
+
+#### Siri 圖標短時間不對，先重啟
+
+Siri / Apple Intelligence 圖標來自 LaunchServices / IconServices / AOSUI 等多層快取。腳本會刷新相關 cache，但有些列表不會即時更新。
+
+如果只有 Siri 圖標不對，而 Apple Intelligence 功能已經可用，先完整重啟一次再看。不要反覆手動替換圖標文件。
+
+#### 出現 macOS 26 風格 Siri 界面時
+
+如果已經打開 Apple Intelligence，但仍看到 macOS 26 風格的 Siri 界面，先不要急著重跑腳本。可以打開網絡監控工具，看是否有 `generativeexperiencesd`、`modelcatalogd`、`assetd`、`mobileassetd` 等進程在下載 AI 資源。
+
+如果有下載流量，等資源下載完成後重啟，再重新打開：
+
+```text
+System Settings -> Apple Intelligence & Siri
+Image Playground
+Writing Tools
+Photos Clean Up
+```
+
+很多情況下，這是模型資產還沒完全 ready，而不是 eligibility 沒通。
+
 ## 還原
 
 目前發布包只保留一個 `.sh`，還原也從同一個入口執行：
