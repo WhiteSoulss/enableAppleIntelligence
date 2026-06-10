@@ -11,6 +11,7 @@ DO_ELIGIBILITY=1
 DO_SAE=1
 DO_LOCATION_IP_FIX=1
 DO_COUNTRYD_US=1
+DO_MACOS27_SIRI_AI=1
 FORCE_GEOSERVICES_US=0
 DO_SIRI_LOCATION_ICON_RUNTIME_FIX=1
 DO_WEB_SEARCH_FIX=1
@@ -31,6 +32,10 @@ GEOSERVICES_DIR="/var/db/locationd/Library/Caches/GeoServices"
 GEOSERVICES_DIRECT_STORE="${GEOSERVICES_DIR}/DirectReadConfigStore.plist"
 COUNTRYD_PLIST="/private/var/db/com.apple.countryd/countryCodeCache.plist"
 COUNTRYD_BACKUP_BASE="/private/var/db/countryd_cache_backup"
+FEATUREFLAGS_OVERRIDE_DIR="/Library/Preferences/FeatureFlags/Domain"
+GM_FEATUREFLAGS_OVERRIDE_PLIST="${FEATUREFLAGS_OVERRIDE_DIR}/GenerativeModels.plist"
+SYSTEM_GM_FEATUREFLAGS_PLIST="/System/Library/FeatureFlags/Domain/GenerativeModels.plist"
+FEATUREFLAGS_BACKUP_BASE="/private/var/db/codex_featureflags_backup"
 
 ELIGIBILITYD_PLIST="/private/var/db/eligibilityd/eligibility.plist"
 OS_ELIGIBILITY_PLIST="/private/var/db/os_eligibility/eligibility.plist"
@@ -82,6 +87,9 @@ Options:
                         Force GeoServices location country cache to US instead
                         of using the current public IP exit country.
   --skip-countryd       Do not apply the method-2 countryd US cache patch.
+  --skip-macos27-siri-ai
+                        Do not install the macOS 27 EnhancedSiriWaitlist
+                        FeatureFlags override.
   --skip-siri-location-icon
                         Do not integrate the Location Services Siri icon runtime fix.
   --skip-web-search     Do not normalize the Siri/Safari web search provider to Google.
@@ -104,6 +112,8 @@ What this single script does:
     or forces it to US with --force-geoservices-us
   - applies the method-2 countryd cache patch by forcing
     /private/var/db/com.apple.countryd/countryCodeCache.plist to US
+  - on macOS 27+, installs a FeatureFlags override that sets
+    GenerativeModels.EnhancedSiriWaitlist.Enabled = false
   - integrates the Location Services Siri icon fix into load-region-spoof.sh
   - normalizes the Siri/Safari web search provider to Google
   - refreshes affected availability clients
@@ -129,6 +139,7 @@ while [[ $# -gt 0 ]]; do
       DO_SAE=0
       DO_LOCATION_IP_FIX=0
       DO_COUNTRYD_US=0
+      DO_MACOS27_SIRI_AI=0
       DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
       DO_WEB_SEARCH_FIX=0
       ;;
@@ -140,6 +151,7 @@ while [[ $# -gt 0 ]]; do
       DO_SAE=0
       DO_LOCATION_IP_FIX=0
       DO_COUNTRYD_US=0
+      DO_MACOS27_SIRI_AI=0
       DO_ICON_FIX=0
       DO_WEB_SEARCH_FIX=0
       ;;
@@ -151,6 +163,7 @@ while [[ $# -gt 0 ]]; do
       DO_SAE=0
       DO_LOCATION_IP_FIX=0
       DO_COUNTRYD_US=0
+      DO_MACOS27_SIRI_AI=0
       DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
       DO_WEB_SEARCH_FIX=0
       DO_ICON_FIX=0
@@ -164,6 +177,7 @@ while [[ $# -gt 0 ]]; do
       DO_SAE=0
       DO_LOCATION_IP_FIX=0
       DO_COUNTRYD_US=0
+      DO_MACOS27_SIRI_AI=0
       DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
       DO_WEB_SEARCH_FIX=0
       DO_ICON_FIX=0
@@ -185,6 +199,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-countryd)
       DO_COUNTRYD_US=0
+      ;;
+    --skip-macos27-siri-ai|--skip-macos27-siri)
+      DO_MACOS27_SIRI_AI=0
       ;;
     --force-geoservices-us|--force-location-us|--force-geo-us)
       DO_LOCATION_IP_FIX=1
@@ -275,6 +292,16 @@ run_root() {
   else
     sudo "$@"
   fi
+}
+
+macos_major_version() {
+  local version major
+  version="$(sw_vers -productVersion 2>/dev/null || echo 0)"
+  major="${version%%.*}"
+  if [[ "$major" != <-> ]]; then
+    major=0
+  fi
+  echo "$major"
 }
 
 pb_sudo() {
@@ -1075,6 +1102,74 @@ PY
   echo "Applied method-2 countryd cache patch and locked countryCodeCache.plist."
 }
 
+install_macos27_siri_ai_featureflag_override() {
+  local major_version
+  major_version="$(macos_major_version)"
+
+  if (( major_version < 27 )); then
+    section "macOS 27 Siri AI feature flag"
+    echo "Current macOS major version is ${major_version}; skipping macOS 27-only EnhancedSiriWaitlist override."
+    return 0
+  fi
+
+  section "macOS 27 Siri AI feature flag"
+  echo "Installing FeatureFlags override:"
+  echo "  $GM_FEATUREFLAGS_OVERRIDE_PLIST"
+  echo "Setting GenerativeModels.EnhancedSiriWaitlist.Enabled = false"
+
+  local backup_dir patcher
+  backup_dir="$FEATUREFLAGS_BACKUP_BASE/generative-models-$(date +%Y%m%d-%H%M%S)"
+  run_root mkdir -p "$FEATUREFLAGS_OVERRIDE_DIR" "$backup_dir"
+
+  if [[ -e "$SYSTEM_GM_FEATUREFLAGS_PLIST" ]]; then
+    run_root cp -p "$SYSTEM_GM_FEATUREFLAGS_PLIST" "$backup_dir/System.GenerativeModels.plist.before" 2>/dev/null || true
+  fi
+  if [[ -e "$GM_FEATUREFLAGS_OVERRIDE_PLIST" ]]; then
+    run_root cp -p "$GM_FEATUREFLAGS_OVERRIDE_PLIST" "$backup_dir/Library.GenerativeModels.plist.before"
+  fi
+  echo "Backup: $backup_dir"
+
+  patcher="$(mktemp)"
+  cat > "$patcher" <<'PY'
+import os
+import plistlib
+import sys
+
+path = sys.argv[1]
+if os.path.exists(path):
+    with open(path, "rb") as f:
+        data = plistlib.load(f)
+else:
+    data = {}
+
+if not isinstance(data, dict):
+    data = {}
+
+entry = data.get("EnhancedSiriWaitlist")
+if not isinstance(entry, dict):
+    entry = {}
+entry["Enabled"] = False
+data["EnhancedSiriWaitlist"] = entry
+
+tmp = f"{path}.codex-tmp"
+with open(tmp, "wb") as f:
+    plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
+os.replace(tmp, path)
+PY
+
+  run_root /usr/bin/python3 "$patcher" "$GM_FEATUREFLAGS_OVERRIDE_PLIST"
+  rm -f "$patcher"
+  run_root chown root:wheel "$GM_FEATUREFLAGS_OVERRIDE_PLIST"
+  run_root chmod 0644 "$GM_FEATUREFLAGS_OVERRIDE_PLIST"
+
+  echo "-- GenerativeModels FeatureFlags override --"
+  plutil -p "$GM_FEATUREFLAGS_OVERRIDE_PLIST" 2>/dev/null || true
+
+  killall cfprefsd "System Settings" SiriPreferenceExtension SiriNCService Siri 2>/dev/null || true
+  run_root killall generativeexperiencesd modelcatalogd 2>/dev/null || true
+  echo "Installed macOS 27 Siri AI waitlist override. Reboot is recommended."
+}
+
 force_web_search_provider_google() {
   section "Normalize Siri/Safari web search provider"
 
@@ -1415,6 +1510,7 @@ uninstall_backup_state() {
   uninstall_backup_path "$ELIGIBILITYD_PLIST"
   uninstall_backup_path "$OS_ELIGIBILITY_PLIST"
   uninstall_backup_path "$COUNTRYD_PLIST"
+  uninstall_backup_path "$GM_FEATUREFLAGS_OVERRIDE_PLIST"
 
   if [[ "$DO_UNINSTALL_DRY_RUN" == "0" ]]; then
     {
@@ -1492,6 +1588,50 @@ uninstall_unlock_countryd_cache() {
   fi
 }
 
+uninstall_clear_macos27_featureflag_override() {
+  section "Clear macOS 27 Siri AI FeatureFlags override"
+  if [[ ! -e "$GM_FEATUREFLAGS_OVERRIDE_PLIST" ]]; then
+    echo "$GM_FEATUREFLAGS_OVERRIDE_PLIST not present"
+    return 0
+  fi
+
+  local cleaner
+  cleaner="$(mktemp)"
+  cat > "$cleaner" <<'PY'
+import os
+import plistlib
+import sys
+
+path = sys.argv[1]
+with open(path, "rb") as f:
+    data = plistlib.load(f)
+
+if isinstance(data, dict):
+    data.pop("EnhancedSiriWaitlist", None)
+else:
+    data = {}
+
+if data:
+    tmp = f"{path}.codex-tmp"
+    with open(tmp, "wb") as f:
+        plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
+    os.replace(tmp, path)
+else:
+    os.remove(path)
+PY
+
+  if [[ "$DO_UNINSTALL_DRY_RUN" == "0" ]]; then
+    run_root /usr/bin/python3 "$cleaner" "$GM_FEATUREFLAGS_OVERRIDE_PLIST"
+    if [[ -e "$GM_FEATUREFLAGS_OVERRIDE_PLIST" ]]; then
+      run_root chown root:wheel "$GM_FEATUREFLAGS_OVERRIDE_PLIST" 2>/dev/null || true
+      run_root chmod 0644 "$GM_FEATUREFLAGS_OVERRIDE_PLIST" 2>/dev/null || true
+    fi
+  else
+    echo "+ sudo /usr/bin/python3 <remove EnhancedSiriWaitlist> $GM_FEATUREFLAGS_OVERRIDE_PLIST"
+  fi
+  rm -f "$cleaner"
+}
+
 uninstall_clear_user_defaults() {
   section "Clear user-level Apple Intelligence force defaults"
   uninstall_run defaults delete com.apple.gms.availability 2>/dev/null || true
@@ -1533,6 +1673,7 @@ run_uninstall_restore() {
   uninstall_remove_kext
   uninstall_clear_eligibility_cache
   uninstall_unlock_countryd_cache
+  uninstall_clear_macos27_featureflag_override
   uninstall_clear_user_defaults
   uninstall_restart_services
   uninstall_print_final_state
@@ -1570,7 +1711,7 @@ if [[ "$DO_UNINSTALL" == "1" ]]; then
   exit 0
 fi
 
-if [[ "$DO_VERIFY_ONLY" == "0" && ( "$DO_LOAD_KEXT" == "1" || "$DO_INSTALL_LAUNCHDAEMON" == "1" || "$DO_ELIGIBILITY" == "1" || "$DO_LOCATION_IP_FIX" == "1" || "$DO_COUNTRYD_US" == "1" ) ]]; then
+if [[ "$DO_VERIFY_ONLY" == "0" && ( "$DO_LOAD_KEXT" == "1" || "$DO_INSTALL_LAUNCHDAEMON" == "1" || "$DO_ELIGIBILITY" == "1" || "$DO_LOCATION_IP_FIX" == "1" || "$DO_COUNTRYD_US" == "1" || "$DO_MACOS27_SIRI_AI" == "1" ) ]]; then
   section "sudo"
   echo "Requesting sudo once for kext/eligibility/system-snapshot operations..."
   sudo_keepalive_start
@@ -1599,6 +1740,20 @@ if [[ "$DO_VERIFY_ONLY" == "1" ]]; then
   else
     echo "$COUNTRYD_PLIST not present"
   fi
+  section "macOS 27 GenerativeModels FeatureFlags override"
+  echo "Current macOS major version: $(macos_major_version)"
+  if [[ -e "$SYSTEM_GM_FEATUREFLAGS_PLIST" ]]; then
+    echo "-- system GenerativeModels.plist EnhancedSiriWaitlist --"
+    /usr/libexec/PlistBuddy -c "Print :EnhancedSiriWaitlist" "$SYSTEM_GM_FEATUREFLAGS_PLIST" 2>/dev/null || echo "No system EnhancedSiriWaitlist key"
+  else
+    echo "$SYSTEM_GM_FEATUREFLAGS_PLIST not present"
+  fi
+  if [[ -e "$GM_FEATUREFLAGS_OVERRIDE_PLIST" ]]; then
+    echo "-- override GenerativeModels.plist --"
+    plutil -p "$GM_FEATUREFLAGS_OVERRIDE_PLIST" 2>/dev/null || true
+  else
+    echo "$GM_FEATUREFLAGS_OVERRIDE_PLIST not present"
+  fi
   section "SiriAvailability"
   defaults read "$SIRI_DOMAIN" "$SIRI_KEY" 2>/dev/null || true
   final_hints
@@ -1611,6 +1766,7 @@ fi
 [[ "$DO_SAE" == "1" ]] && force_siri_sae_orchestration_mode
 [[ "$DO_LOCATION_IP_FIX" == "1" ]] && pin_geoservices_location_country_from_ip
 [[ "$DO_COUNTRYD_US" == "1" ]] && force_countryd_us_cache
+[[ "$DO_MACOS27_SIRI_AI" == "1" ]] && install_macos27_siri_ai_featureflag_override
 [[ "$DO_WEB_SEARCH_FIX" == "1" ]] && force_web_search_provider_google
 [[ "$DO_SIRI_LOCATION_ICON_RUNTIME_FIX" == "1" ]] && install_siri_location_icon_runtime_fix
 

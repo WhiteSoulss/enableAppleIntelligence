@@ -13,15 +13,24 @@ Siri SAE 模式
 
 ## macOS 27 兼容性提示
 
-macOS 27 目前僅針對開發者 beta / 預覽版做觀察，尚未完成測試與適配。
+macOS 27 目前仍按開發者 beta / 預覽版處理，屬於實驗支持，不保證所有 beta build 都可用。
 
-目前已知問題：
+macOS 27 的新 Siri AI 多了一層 `EnhancedSiriWaitlist` FeatureFlags gate。主腳本會在 macOS 27 或更新版本上自動寫入覆蓋 plist：
 
 ```text
-Siri AI 目前無法開啟
+/Library/Preferences/FeatureFlags/Domain/GenerativeModels.plist
+EnhancedSiriWaitlist.Enabled = false
 ```
 
-本項目目前主要面向 macOS 26.5 / 26.5.1。macOS 27 會在正式版發布後再重新分析底層鏈路並適配。
+這是利用 macOS FeatureFlags 的 override 路徑，不直接修改 `/System/Library/FeatureFlags/Domain/GenerativeModels.plist`，因此比直接改 sealed system volume 更適合合入一鍵腳本。
+
+如果你只想跑 26.x 的原流程，或想手動測試 macOS 27，可以跳過這一步：
+
+```bash
+./enable_apple_intelligence_oneclick.sh --skip-macos27-siri-ai
+```
+
+本項目目前完整驗證的主線仍是 macOS 26.5 / 26.5.1。macOS 27 會在正式版發布後再重新分析底層鏈路並做穩定適配。
 
 ## 原理
 
@@ -251,9 +260,10 @@ Siri / Safari 的網頁搜索 provider 也是另一條鏈。主腳本會把全�
 6. 將 Siri SAE orchestration mode 設成 `4`。
 7. 根據當前出口 IP 自動寫入 GeoServices 定位國家 cache；如果加 `--force-geoservices-us`，則固定寫 `US`。
 8. 合併 `kanshurichard/enableAppleAI` 方法二的 `countryd` cache 修正，把 `/private/var/db/com.apple.countryd/countryCodeCache.plist` 內的兩位國家碼固定為 `US` 並鎖定。
-9. 將 Location Services 裡 Siri 圖標的 runtime identity 修正合入 `load-region-spoof.sh`。
-10. 將 Siri / Safari web search provider 正規化為 Google，並清理 Safari RecentWebSearches 裡的舊 Baidu 條目。
-11. 重啟相關服務：
+9. 在 macOS 27+ 上寫入 `GenerativeModels.EnhancedSiriWaitlist.Enabled = false` 的 FeatureFlags override，用於繞過新 Siri AI waitlist gate。
+10. 將 Location Services 裡 Siri 圖標的 runtime identity 修正合入 `load-region-spoof.sh`。
+11. 將 Siri / Safari web search provider 正規化為 Google，並清理 Safari RecentWebSearches 裡的舊 Baidu 條目。
+12. 重啟相關服務：
 
    ```text
    eligibilityd
@@ -269,9 +279,9 @@ Siri / Safari 的網頁搜索 provider 也是另一條鏈。主腳本會把全�
    cfprefsd
    ```
 
-12. 發送 availability / eligibility notification。
-13. 恢復 Siri menu bar extra。
-14. 如果使用 `--all`，刷新 Siri Launchpad 圖標註冊；只有在舊補丁破壞過 Siri.app Info.plist 時才需要修復 snapshot。
+13. 發送 availability / eligibility notification。
+14. 恢復 Siri menu bar extra。
+15. 如果使用 `--all`，刷新 Siri Launchpad 圖標註冊；只有在舊補丁破壞過 Siri.app Info.plist 時才需要修復 snapshot。
 
 ## Eligibility 修改內容
 
