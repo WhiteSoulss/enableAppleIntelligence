@@ -11,6 +11,7 @@ DO_ELIGIBILITY=1
 DO_SAE=1
 DO_LOCATION_IP_FIX=1
 DO_COUNTRYD_US=1
+DO_APPLE_INTERNAL_VARIANT=1
 DO_MACOS27_SIRI_AI=1
 FORCE_GEOSERVICES_US=0
 DO_SIRI_LOCATION_ICON_RUNTIME_FIX=1
@@ -32,6 +33,9 @@ GEOSERVICES_DIR="/var/db/locationd/Library/Caches/GeoServices"
 GEOSERVICES_DIRECT_STORE="${GEOSERVICES_DIR}/DirectReadConfigStore.plist"
 COUNTRYD_PLIST="/private/var/db/com.apple.countryd/countryCodeCache.plist"
 COUNTRYD_BACKUP_BASE="/private/var/db/countryd_cache_backup"
+SYSTEM_RW_MNT="/private/tmp/codex_system_rw"
+APPLE_INTERNAL_VARIANT_PLIST="/System/Library/CoreServices/AppleInternalVariant.plist"
+APPLE_INTERNAL_VARIANT_BACKUP_BASE="/private/var/db/codex_apple_internal_variant_backup"
 FEATUREFLAGS_OVERRIDE_DIR="/Library/Preferences/FeatureFlags/Domain"
 GM_FEATUREFLAGS_OVERRIDE_PLIST="${FEATUREFLAGS_OVERRIDE_DIR}/GenerativeModels.plist"
 SYSTEM_GM_FEATUREFLAGS_PLIST="/System/Library/FeatureFlags/Domain/GenerativeModels.plist"
@@ -87,6 +91,9 @@ Options:
                         Force GeoServices location country cache to US instead
                         of using the current public IP exit country.
   --skip-countryd       Do not apply the method-2 countryd US cache patch.
+  --skip-apple-internal
+                        On macOS 27+, do not create the sealed-system
+                        AppleInternalVariant.plist marker.
   --skip-macos27-siri-ai
                         Do not install the macOS 27 EnhancedSiriWaitlist
                         FeatureFlags override.
@@ -112,6 +119,8 @@ What this single script does:
     or forces it to US with --force-geoservices-us
   - applies the method-2 countryd cache patch by forcing
     /private/var/db/com.apple.countryd/countryCodeCache.plist to US
+  - on macOS 27+, creates /System/Library/CoreServices/AppleInternalVariant.plist
+    with AppleInternal = true, then creates a new sealed boot snapshot
   - on macOS 27+, installs a FeatureFlags override that sets
     GenerativeModels.EnhancedSiriWaitlist.Enabled = false
   - integrates the Location Services Siri icon fix into load-region-spoof.sh
@@ -139,6 +148,7 @@ while [[ $# -gt 0 ]]; do
       DO_SAE=0
       DO_LOCATION_IP_FIX=0
       DO_COUNTRYD_US=0
+      DO_APPLE_INTERNAL_VARIANT=0
       DO_MACOS27_SIRI_AI=0
       DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
       DO_WEB_SEARCH_FIX=0
@@ -151,6 +161,7 @@ while [[ $# -gt 0 ]]; do
       DO_SAE=0
       DO_LOCATION_IP_FIX=0
       DO_COUNTRYD_US=0
+      DO_APPLE_INTERNAL_VARIANT=0
       DO_MACOS27_SIRI_AI=0
       DO_ICON_FIX=0
       DO_WEB_SEARCH_FIX=0
@@ -163,6 +174,7 @@ while [[ $# -gt 0 ]]; do
       DO_SAE=0
       DO_LOCATION_IP_FIX=0
       DO_COUNTRYD_US=0
+      DO_APPLE_INTERNAL_VARIANT=0
       DO_MACOS27_SIRI_AI=0
       DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
       DO_WEB_SEARCH_FIX=0
@@ -177,6 +189,7 @@ while [[ $# -gt 0 ]]; do
       DO_SAE=0
       DO_LOCATION_IP_FIX=0
       DO_COUNTRYD_US=0
+      DO_APPLE_INTERNAL_VARIANT=0
       DO_MACOS27_SIRI_AI=0
       DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
       DO_WEB_SEARCH_FIX=0
@@ -199,6 +212,9 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-countryd)
       DO_COUNTRYD_US=0
+      ;;
+    --skip-apple-internal|--skip-apple-internal-variant|--skip-internal-variant)
+      DO_APPLE_INTERNAL_VARIANT=0
       ;;
     --skip-macos27-siri-ai|--skip-macos27-siri)
       DO_MACOS27_SIRI_AI=0
@@ -302,6 +318,43 @@ macos_major_version() {
     major=0
   fi
   echo "$major"
+}
+
+find_system_volume_device() {
+  local root_dev sys_dev
+  root_dev="$(mount | awk '$3 == "/" {print $1; exit}')"
+  if [[ -z "$root_dev" ]]; then
+    echo "Could not determine root APFS snapshot device from mount output." >&2
+    return 1
+  fi
+
+  # On sealed-root macOS, / is usually mounted from a snapshot device such as
+  # /dev/disk3s5s1. The writable System volume is the parent, /dev/disk3s5.
+  sys_dev="$(printf '%s' "$root_dev" | sed -E 's/(s[0-9]+)s[0-9]+$/\1/')"
+  echo "$sys_dev"
+}
+
+mount_system_volume_rw() {
+  local mnt="$1"
+  local sys_dev
+  sys_dev="$(find_system_volume_device)"
+
+  run_root mkdir -p "$mnt"
+  if mount | grep -q " on ${mnt} "; then
+    return 0
+  fi
+
+  echo "Mounting System volume read-write:"
+  echo "  device: $sys_dev"
+  echo "  mount:  $mnt"
+  run_root mount -t apfs -o nobrowse,rw "$sys_dev" "$mnt"
+}
+
+apple_internal_variant_is_enabled() {
+  local plist="$1"
+  [[ -f "$plist" ]] || return 1
+  /usr/libexec/PlistBuddy -c 'Print :AppleInternal' "$plist" 2>/dev/null |
+    grep -qi '^true$'
 }
 
 pb_sudo() {
@@ -1102,6 +1155,81 @@ PY
   echo "Applied method-2 countryd cache patch and locked countryCodeCache.plist."
 }
 
+install_apple_internal_variant_plist() {
+  section "AppleInternalVariant sealed-system marker"
+
+  local major_version
+  major_version="$(macos_major_version)"
+  if (( major_version < 27 )); then
+    echo "Current macOS major version is ${major_version}; skipping macOS 27-only AppleInternalVariant marker."
+    return 0
+  fi
+
+  if apple_internal_variant_is_enabled "$APPLE_INTERNAL_VARIANT_PLIST"; then
+    echo "Live root already has AppleInternalVariant enabled:"
+    echo "  $APPLE_INTERNAL_VARIANT_PLIST"
+    return 0
+  fi
+
+  if ! csrutil authenticated-root status 2>/dev/null | grep -qi 'disabled'; then
+    cat >&2 <<'MSG'
+AppleInternalVariant.plist must be written into the sealed System volume, but
+Authenticated Root is currently enabled and the live root is read-only.
+
+Boot to Recovery first and run:
+
+  csrutil disable
+  csrutil authenticated-root disable
+
+Then boot macOS and rerun this script. The script will mount the System volume,
+write /System/Library/CoreServices/AppleInternalVariant.plist, and create a new
+boot snapshot.
+MSG
+    exit 1
+  fi
+
+  local backup_dir mounted_plist tmp_plist
+  backup_dir="$APPLE_INTERNAL_VARIANT_BACKUP_BASE/backup-$(date +%Y%m%d-%H%M%S)"
+  mounted_plist="${SYSTEM_RW_MNT}${APPLE_INTERNAL_VARIANT_PLIST}"
+  tmp_plist="$(mktemp)"
+
+  run_root mkdir -p "$backup_dir"
+  if [[ -e "$APPLE_INTERNAL_VARIANT_PLIST" ]]; then
+    run_root cp -p "$APPLE_INTERNAL_VARIANT_PLIST" "$backup_dir/AppleInternalVariant.live.before" 2>/dev/null || true
+  fi
+
+  mount_system_volume_rw "$SYSTEM_RW_MNT"
+
+  if [[ -e "$mounted_plist" ]]; then
+    run_root cp -p "$mounted_plist" "$backup_dir/AppleInternalVariant.snapshot.before" 2>/dev/null || true
+  fi
+
+  cat > "$tmp_plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>AppleInternal</key>
+	<true/>
+</dict>
+</plist>
+PLIST
+
+  run_root mkdir -p "$(dirname "$mounted_plist")"
+  run_root cp "$tmp_plist" "$mounted_plist"
+  rm -f "$tmp_plist"
+  run_root chown root:wheel "$mounted_plist"
+  run_root chmod 0644 "$mounted_plist"
+  run_root plutil -lint "$mounted_plist"
+
+  echo "Creating new sealed boot snapshot with AppleInternalVariant enabled..."
+  run_root bless --mount "$SYSTEM_RW_MNT" --create-snapshot --setBoot
+
+  echo "Backup: $backup_dir"
+  echo "AppleInternalVariant will become visible after reboot:"
+  echo "  $APPLE_INTERNAL_VARIANT_PLIST"
+}
+
 install_macos27_siri_ai_featureflag_override() {
   local major_version
   major_version="$(macos_major_version)"
@@ -1588,6 +1716,49 @@ uninstall_unlock_countryd_cache() {
   fi
 }
 
+uninstall_clear_apple_internal_variant() {
+  section "Clear AppleInternalVariant sealed-system marker"
+
+  if [[ "$DO_UNINSTALL_DRY_RUN" == "1" ]]; then
+    echo "+ remove $APPLE_INTERNAL_VARIANT_PLIST from a mounted System volume and create a new boot snapshot"
+    return 0
+  fi
+
+  if ! csrutil authenticated-root status 2>/dev/null | grep -qi 'disabled'; then
+    cat <<'MSG'
+Authenticated Root is enabled, so the sealed System volume cannot be modified
+from the live OS. To remove AppleInternalVariant.plist, boot Recovery and run:
+
+  csrutil authenticated-root disable
+
+Then boot macOS and rerun:
+
+  ./enable_apple_intelligence_oneclick.sh --uninstall
+MSG
+    return 0
+  fi
+
+  local backup_dir mounted_plist
+  backup_dir="$APPLE_INTERNAL_VARIANT_BACKUP_BASE/uninstall-$(date +%Y%m%d-%H%M%S)"
+  mounted_plist="${SYSTEM_RW_MNT}${APPLE_INTERNAL_VARIANT_PLIST}"
+  run_root mkdir -p "$backup_dir"
+
+  mount_system_volume_rw "$SYSTEM_RW_MNT"
+
+  if [[ ! -e "$mounted_plist" ]]; then
+    echo "$mounted_plist not present in mounted System volume"
+    return 0
+  fi
+
+  run_root cp -p "$mounted_plist" "$backup_dir/AppleInternalVariant.snapshot.before-remove" 2>/dev/null || true
+  run_root rm -f "$mounted_plist"
+
+  echo "Creating new sealed boot snapshot after removing AppleInternalVariant..."
+  run_root bless --mount "$SYSTEM_RW_MNT" --create-snapshot --setBoot
+  echo "Backup: $backup_dir"
+  echo "Reboot is required for removal to become the live root."
+}
+
 uninstall_clear_macos27_featureflag_override() {
   section "Clear macOS 27 Siri AI FeatureFlags override"
   if [[ ! -e "$GM_FEATUREFLAGS_OVERRIDE_PLIST" ]]; then
@@ -1673,6 +1844,7 @@ run_uninstall_restore() {
   uninstall_remove_kext
   uninstall_clear_eligibility_cache
   uninstall_unlock_countryd_cache
+  uninstall_clear_apple_internal_variant
   uninstall_clear_macos27_featureflag_override
   uninstall_clear_user_defaults
   uninstall_restart_services
@@ -1711,7 +1883,7 @@ if [[ "$DO_UNINSTALL" == "1" ]]; then
   exit 0
 fi
 
-if [[ "$DO_VERIFY_ONLY" == "0" && ( "$DO_LOAD_KEXT" == "1" || "$DO_INSTALL_LAUNCHDAEMON" == "1" || "$DO_ELIGIBILITY" == "1" || "$DO_LOCATION_IP_FIX" == "1" || "$DO_COUNTRYD_US" == "1" || "$DO_MACOS27_SIRI_AI" == "1" ) ]]; then
+if [[ "$DO_VERIFY_ONLY" == "0" && ( "$DO_LOAD_KEXT" == "1" || "$DO_INSTALL_LAUNCHDAEMON" == "1" || "$DO_ELIGIBILITY" == "1" || "$DO_LOCATION_IP_FIX" == "1" || "$DO_COUNTRYD_US" == "1" || "$DO_APPLE_INTERNAL_VARIANT" == "1" || "$DO_MACOS27_SIRI_AI" == "1" ) ]]; then
   section "sudo"
   echo "Requesting sudo once for kext/eligibility/system-snapshot operations..."
   sudo_keepalive_start
@@ -1740,6 +1912,13 @@ if [[ "$DO_VERIFY_ONLY" == "1" ]]; then
   else
     echo "$COUNTRYD_PLIST not present"
   fi
+  section "AppleInternalVariant"
+  if [[ -e "$APPLE_INTERNAL_VARIANT_PLIST" ]]; then
+    ls -lO "$APPLE_INTERNAL_VARIANT_PLIST" 2>/dev/null || true
+    plutil -p "$APPLE_INTERNAL_VARIANT_PLIST" 2>/dev/null || true
+  else
+    echo "$APPLE_INTERNAL_VARIANT_PLIST not present on the live root"
+  fi
   section "macOS 27 GenerativeModels FeatureFlags override"
   echo "Current macOS major version: $(macos_major_version)"
   if [[ -e "$SYSTEM_GM_FEATUREFLAGS_PLIST" ]]; then
@@ -1766,6 +1945,7 @@ fi
 [[ "$DO_SAE" == "1" ]] && force_siri_sae_orchestration_mode
 [[ "$DO_LOCATION_IP_FIX" == "1" ]] && pin_geoservices_location_country_from_ip
 [[ "$DO_COUNTRYD_US" == "1" ]] && force_countryd_us_cache
+[[ "$DO_APPLE_INTERNAL_VARIANT" == "1" ]] && install_apple_internal_variant_plist
 [[ "$DO_MACOS27_SIRI_AI" == "1" ]] && install_macos27_siri_ai_featureflag_override
 [[ "$DO_WEB_SEARCH_FIX" == "1" ]] && force_web_search_provider_google
 [[ "$DO_SIRI_LOCATION_ICON_RUNTIME_FIX" == "1" ]] && install_siri_location_icon_runtime_fix

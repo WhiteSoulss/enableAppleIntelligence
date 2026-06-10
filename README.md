@@ -24,6 +24,32 @@ EnhancedSiriWaitlist.Enabled = false
 
 這是利用 macOS FeatureFlags 的 override 路徑，不直接修改 `/System/Library/FeatureFlags/Domain/GenerativeModels.plist`，因此比直接改 sealed system volume 更適合合入一鍵腳本。
 
+另外，macOS 27 的部分新 Siri AI 路徑會檢查 AppleInternal variant。主腳本現在默認會在 sealed System volume 裡建立：
+
+```text
+/System/Library/CoreServices/AppleInternalVariant.plist
+AppleInternal = true
+```
+
+這一步和普通 Data volume plist 不同，必須先在 Recovery 裡執行：
+
+```bash
+csrutil disable
+csrutil authenticated-root disable
+```
+
+腳本會自動掛載 System volume、寫入 `AppleInternalVariant.plist`，然後執行：
+
+```bash
+bless --mount /private/tmp/codex_system_rw --create-snapshot --setBoot
+```
+
+因此這一步需要重啟後才會在 live root 生效。如果你不想開 AppleInternal variant，可以跳過：
+
+```bash
+./enable_apple_intelligence_oneclick.sh --skip-apple-internal
+```
+
 如果你只想跑 26.x 的原流程，或想手動測試 macOS 27，可以跳過這一步：
 
 ```bash
@@ -260,10 +286,11 @@ Siri / Safari 的網頁搜索 provider 也是另一條鏈。主腳本會把全�
 6. 將 Siri SAE orchestration mode 設成 `4`。
 7. 根據當前出口 IP 自動寫入 GeoServices 定位國家 cache；如果加 `--force-geoservices-us`，則固定寫 `US`。
 8. 合併 `kanshurichard/enableAppleAI` 方法二的 `countryd` cache 修正，把 `/private/var/db/com.apple.countryd/countryCodeCache.plist` 內的兩位國家碼固定為 `US` 並鎖定。
-9. 在 macOS 27+ 上寫入 `GenerativeModels.EnhancedSiriWaitlist.Enabled = false` 的 FeatureFlags override，用於繞過新 Siri AI waitlist gate。
-10. 將 Location Services 裡 Siri 圖標的 runtime identity 修正合入 `load-region-spoof.sh`。
-11. 將 Siri / Safari web search provider 正規化為 Google，並清理 Safari RecentWebSearches 裡的舊 Baidu 條目。
-12. 重啟相關服務：
+9. 在 macOS 27+ 上，於 sealed System volume 裡建立 `/System/Library/CoreServices/AppleInternalVariant.plist`，設置 `AppleInternal = true`，並建立新的 boot snapshot。
+10. 在 macOS 27+ 上寫入 `GenerativeModels.EnhancedSiriWaitlist.Enabled = false` 的 FeatureFlags override，用於繞過新 Siri AI waitlist gate。
+11. 將 Location Services 裡 Siri 圖標的 runtime identity 修正合入 `load-region-spoof.sh`。
+12. 將 Siri / Safari web search provider 正規化為 Google，並清理 Safari RecentWebSearches 裡的舊 Baidu 條目。
+13. 重啟相關服務：
 
    ```text
    eligibilityd
