@@ -4,56 +4,53 @@ set -euo pipefail
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$ROOT_DIR"
+SELF="$ROOT_DIR/$(basename "$0")"
 
-DO_ICON_FIX=0
-DO_INSTALL_LAUNCHDAEMON=1
-DO_LOAD_KEXT=1
-DO_ELIGIBILITY=1
-DO_SAE=1
-DO_LOCATION_IP_FIX=1
-DO_COUNTRYD_US=1
-DO_APPLE_INTERNAL_VARIANT=1
-DO_MACOS27_SIRI_AI=1
+ACTION="install"
+DRY_RUN=0
 FORCE_GEOSERVICES_US=0
-DO_SIRI_LOCATION_ICON_RUNTIME_FIX=1
-DO_WEB_SEARCH_FIX=1
-DO_VERIFY_ONLY=0
-DO_UNINSTALL=0
-DO_UNINSTALL_DRY_RUN=0
-DO_ICON_ONLY=0
+SKIP_KEXT=0
+SKIP_LAUNCHDAEMON=0
+SKIP_ELIGIBILITY=0
+SKIP_SAE=0
+SKIP_GEOSERVICES=0
+SKIP_COUNTRYD=0
+SKIP_APPLE_INTERNAL=0
+SKIP_MACOS27_SIRI_AI=0
+SKIP_SIRI_LOCATION_ICON=0
+SKIP_WEB_SEARCH=0
+DO_ICON_FIX=0
 
-KEXT="/Library/Extensions/CodexRegionSpoof.kext"
+KEXT_ID="local.codex.RegionSpoof"
+KEXT_DST="/Library/Extensions/CodexRegionSpoof.kext"
 LOCAL_KEXT="$ROOT_DIR/tools/CodexRegionSpoof.kext"
 LOCAL_KEXT_BIN="$LOCAL_KEXT/Contents/MacOS/CodexRegionSpoof"
 LOCAL_KEXT_BIN_B64="$LOCAL_KEXT/Contents/MacOS/CodexRegionSpoof.b64"
 LOADER_SCRIPT="/Library/Scripts/Codex/load-region-spoof.sh"
 LOADER_PLIST="/Library/LaunchDaemons/local.codex.region-spoof-loader.plist"
 SIRI_LOCATION_FIX_DIR="/Library/Scripts/Codex/SiriLocationIconFix"
-SIRI_LOCATION_FIX_AGENT="$HOME/Library/LaunchAgents/local.codex.siri-location-icon-fix.plist"
-GEOSERVICES_DIR="/var/db/locationd/Library/Caches/GeoServices"
-GEOSERVICES_DIRECT_STORE="${GEOSERVICES_DIR}/DirectReadConfigStore.plist"
-COUNTRYD_PLIST="/private/var/db/com.apple.countryd/countryCodeCache.plist"
-COUNTRYD_BACKUP_BASE="/private/var/db/countryd_cache_backup"
-SYSTEM_RW_MNT="/private/tmp/codex_system_rw"
-APPLE_INTERNAL_VARIANT_PLIST="/System/Library/CoreServices/AppleInternalVariant.plist"
-APPLE_INTERNAL_VARIANT_BACKUP_BASE="/private/var/db/codex_apple_internal_variant_backup"
-FEATUREFLAGS_OVERRIDE_DIR="/Library/Preferences/FeatureFlags/Domain"
-GM_FEATUREFLAGS_OVERRIDE_PLIST="${FEATUREFLAGS_OVERRIDE_DIR}/GenerativeModels.plist"
-SYSTEM_GM_FEATUREFLAGS_PLIST="/System/Library/FeatureFlags/Domain/GenerativeModels.plist"
-FEATUREFLAGS_BACKUP_BASE="/private/var/db/codex_featureflags_backup"
 
 ELIGIBILITYD_PLIST="/private/var/db/eligibilityd/eligibility.plist"
 OS_ELIGIBILITY_PLIST="/private/var/db/os_eligibility/eligibility.plist"
 ELIGIBILITY_BACKUP_BASE="/private/var/db/eligibilityd_source_backup"
-UNINSTALL_BACKUP_ROOT="$HOME/Documents/Codex/enableAppleIntelligence-restore-backups/$(date +%Y%m%d-%H%M%S)"
+
+GEOSERVICES_DIR="/var/db/locationd/Library/Caches/GeoServices"
+GEOSERVICES_DIRECT_STORE="$GEOSERVICES_DIR/DirectReadConfigStore.plist"
+COUNTRYD_PLIST="/private/var/db/com.apple.countryd/countryCodeCache.plist"
+COUNTRYD_BACKUP_BASE="/private/var/db/countryd_cache_backup"
 
 SIRI_DOMAIN="com.apple.assistant.backedup"
 SIRI_KEY="SiriAvailability"
-SIRI_PREF="$HOME/Library/Preferences/${SIRI_DOMAIN}.plist"
-APPLEID_SETTINGS_SIRI_PREF="$HOME/Library/Containers/com.apple.systempreferences.AppleIDSettings/Data/Library/Preferences/${SIRI_DOMAIN}.plist"
 SIRI_SYSTEM_APP="/System/Applications/Siri.app"
 SIRI_CORESERVICES_APP="/System/Library/CoreServices/Siri.app"
+
+SYSTEM_RW_MNT="/private/tmp/codex_system_rw"
+APPLE_INTERNAL_VARIANT_PLIST="/System/Library/CoreServices/AppleInternalVariant.plist"
+APPLE_INTERNAL_VARIANT_BACKUP_BASE="/private/var/db/codex_apple_internal_variant_backup"
+FEATUREFLAGS_OVERRIDE_DIR="/Library/Preferences/FeatureFlags/Domain"
+GM_FEATUREFLAGS_OVERRIDE_PLIST="$FEATUREFLAGS_OVERRIDE_DIR/GenerativeModels.plist"
+SYSTEM_GM_FEATUREFLAGS_PLIST="/System/Library/FeatureFlags/Domain/GenerativeModels.plist"
+FEATUREFLAGS_BACKUP_BASE="/private/var/db/codex_featureflags_backup"
 
 ELIGIBILITYD_DOMAINS=(
   OS_ELIGIBILITY_DOMAIN_GREYMATTER
@@ -71,382 +68,458 @@ OS_ELIGIBILITY_DOMAINS=(
   OS_ELIGIBILITY_DOMAIN_XCODE_LLM
 )
 
+log() { printf '%s\n' "$*"; }
+section() { printf '\n== %s ==\n' "$1"; }
+ok() { printf '[OK] %s\n' "$1"; }
+warn() { printf '[WARN] %s\n' "$1"; }
+die() { printf '[ERROR] %s\n' "$1" >&2; exit 1; }
+
 usage() {
   cat <<'EOF'
 Usage:
-  ./enable_apple_intelligence_oneclick.sh [options]
+  ./enable_apple_intelligence_oneclick.sh [install|status|uninstall] [options]
+
+Default action:
+  install
+
+Actions:
+  install              Install/load region spoof kext and apply AI state fixes.
+  status, verify       Print current system state.
+  uninstall            Remove this project's kext/LaunchDaemon and unlock caches.
 
 Options:
-  --all                 Run core enable steps and refresh the Siri icon identity.
-  --fix-siri-icon       Refresh/verify the Siri icon identity only.
-                        Uses Apple's built-in IconServices
-                        com.apple.application-icon.siri-intelligence asset.
-  --verify-only         Only print current state; do not change anything.
-  --uninstall           Back up local state, remove kext/LaunchDaemon, clear forced caches.
-  --dry-run             With --uninstall, print restore actions without changing anything.
-  --skip-kext           Do not load CodexRegionSpoof.kext this run.
-  --skip-launchdaemon   Do not install/update the boot-time kext loader.
-  --skip-eligibility    Do not patch eligibility plists.
-  --skip-sae            Do not force Siri SAE orchestration preference.
-  --skip-location-ip    Do not set GeoServices location country from public IP.
+  --verify-only        Alias for status.
+  --uninstall          Alias for uninstall.
+  --dry-run            With uninstall, show actions without changing files.
+  --skip-kext          Do not install/load CodexRegionSpoof.kext this run.
+  --skip-launchdaemon  Do not install/update the boot-time loader.
+  --skip-eligibility   Do not patch eligibility plist domains.
+  --skip-sae           Do not force Siri SAE orchestration preference.
+  --skip-location-ip   Do not write GeoServices country cache.
   --force-geoservices-us
-                        Force GeoServices location country cache to US instead
-                        of using the current public IP exit country.
-  --skip-countryd       Do not apply the method-2 countryd US cache patch.
+                       Force GeoServices location country to US instead of
+                       detecting the current public IP country.
+  --skip-countryd      Do not force countryd cache to US.
   --skip-apple-internal
-                        On macOS 27+, do not create the sealed-system
-                        AppleInternalVariant.plist marker.
+                       On macOS 27+, skip AppleInternalVariant.plist.
   --skip-macos27-siri-ai
-                        Do not install the macOS 27 EnhancedSiriWaitlist
-                        FeatureFlags override.
+                       On macOS 27+, skip EnhancedSiriWaitlist override.
   --skip-siri-location-icon
-                        Do not integrate the Location Services Siri icon runtime fix.
-  --skip-web-search     Do not normalize the Siri/Safari web search provider to Google.
-  -h, --help            Show this help.
+                       Do not install/apply the Location Services Siri icon
+                       runtime patch.
+  --skip-web-search    Do not normalize Siri/Safari web search to Google.
+  --all                Run install and refresh Siri icon identity.
+  --fix-siri-icon      Refresh Siri icon identity only.
+  -h, --help           Show this help.
 
 Recovery prerequisites:
-  1. csrutil disable
-  2. csrutil authenticated-root disable
-  3. Startup Security Utility -> Reduced Security -> allow kernel extensions
-  4. tools/CodexRegionSpoof.kext present in this repository, or already
-     installed at /Library/Extensions/CodexRegionSpoof.kext
+  csrutil disable
+  csrutil authenticated-root disable
+  Startup Security Utility -> Reduced Security -> allow kernel extensions
 
-What this single script does:
-  - verifies SIP / SSV / root IORegistry region state
-  - installs/loads the kernel-side region-info / country-of-origin spoof kext
-  - installs a boot-time LaunchDaemon to reload that kext
-  - patches Apple Intelligence eligibility domains to answer_t = 4
-  - forces Siri SAE orchestration mode
-  - sets GeoServices location country from the current public IP exit country
-    or forces it to US with --force-geoservices-us
-  - applies the method-2 countryd cache patch by forcing
-    /private/var/db/com.apple.countryd/countryCodeCache.plist to US
-  - on macOS 27+, creates /System/Library/CoreServices/AppleInternalVariant.plist
-    with AppleInternal = true, then creates a new sealed boot snapshot
-  - on macOS 27+, installs a FeatureFlags override that sets
-    GenerativeModels.EnhancedSiriWaitlist.Enabled = false
-  - integrates the Location Services Siri icon fix into load-region-spoof.sh
-  - normalizes the Siri/Safari web search provider to Google
-  - refreshes affected availability clients
-  - refreshes the Siri icon identity cache used by com.apple.siri
+After success, the recommended higher-security state is:
+  csrutil authenticated-root enable
+  FileVault on
 
-Core steps use normal sudo prompting. The Siri Location Services icon runtime
-fix is applied once now and then re-applied by the existing boot-time
-load-region-spoof.sh flow after reboot.
+Do not run csrutil enable while using the bundled ad-hoc kext. With SIP fully
+enabled, the kext will not load and the Mac will naturally fall back to CH.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    install)
+      ACTION="install"
+      ;;
+    status|verify|doctor)
+      ACTION="status"
+      ;;
+    icon)
+      ACTION="icon"
+      DO_ICON_FIX=1
+      ;;
+    uninstall|remove)
+      ACTION="uninstall"
+      ;;
+    --verify-only)
+      ACTION="status"
+      ;;
+    --uninstall)
+      ACTION="uninstall"
+      ;;
+    --dry-run)
+      ACTION="uninstall"
+      DRY_RUN=1
+      ;;
     --all)
+      ACTION="install"
       DO_ICON_FIX=1
       ;;
     --fix-siri-icon)
+      ACTION="icon"
       DO_ICON_FIX=1
-      DO_ICON_ONLY=1
-      DO_LOAD_KEXT=0
-      DO_INSTALL_LAUNCHDAEMON=0
-      DO_ELIGIBILITY=0
-      DO_SAE=0
-      DO_LOCATION_IP_FIX=0
-      DO_COUNTRYD_US=0
-      DO_APPLE_INTERNAL_VARIANT=0
-      DO_MACOS27_SIRI_AI=0
-      DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
-      DO_WEB_SEARCH_FIX=0
-      ;;
-    --verify-only)
-      DO_VERIFY_ONLY=1
-      DO_LOAD_KEXT=0
-      DO_INSTALL_LAUNCHDAEMON=0
-      DO_ELIGIBILITY=0
-      DO_SAE=0
-      DO_LOCATION_IP_FIX=0
-      DO_COUNTRYD_US=0
-      DO_APPLE_INTERNAL_VARIANT=0
-      DO_MACOS27_SIRI_AI=0
-      DO_ICON_FIX=0
-      DO_WEB_SEARCH_FIX=0
-      ;;
-    --uninstall)
-      DO_UNINSTALL=1
-      DO_LOAD_KEXT=0
-      DO_INSTALL_LAUNCHDAEMON=0
-      DO_ELIGIBILITY=0
-      DO_SAE=0
-      DO_LOCATION_IP_FIX=0
-      DO_COUNTRYD_US=0
-      DO_APPLE_INTERNAL_VARIANT=0
-      DO_MACOS27_SIRI_AI=0
-      DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
-      DO_WEB_SEARCH_FIX=0
-      DO_ICON_FIX=0
-      ;;
-    --dry-run)
-      DO_UNINSTALL=1
-      DO_UNINSTALL_DRY_RUN=1
-      DO_LOAD_KEXT=0
-      DO_INSTALL_LAUNCHDAEMON=0
-      DO_ELIGIBILITY=0
-      DO_SAE=0
-      DO_LOCATION_IP_FIX=0
-      DO_COUNTRYD_US=0
-      DO_APPLE_INTERNAL_VARIANT=0
-      DO_MACOS27_SIRI_AI=0
-      DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
-      DO_WEB_SEARCH_FIX=0
-      DO_ICON_FIX=0
       ;;
     --skip-kext)
-      DO_LOAD_KEXT=0
+      SKIP_KEXT=1
       ;;
     --skip-launchdaemon)
-      DO_INSTALL_LAUNCHDAEMON=0
+      SKIP_LAUNCHDAEMON=1
       ;;
     --skip-eligibility)
-      DO_ELIGIBILITY=0
+      SKIP_ELIGIBILITY=1
       ;;
     --skip-sae)
-      DO_SAE=0
+      SKIP_SAE=1
       ;;
     --skip-location-ip|--skip-location-cn)
-      DO_LOCATION_IP_FIX=0
-      ;;
-    --skip-countryd)
-      DO_COUNTRYD_US=0
-      ;;
-    --skip-apple-internal|--skip-apple-internal-variant|--skip-internal-variant)
-      DO_APPLE_INTERNAL_VARIANT=0
-      ;;
-    --skip-macos27-siri-ai|--skip-macos27-siri)
-      DO_MACOS27_SIRI_AI=0
+      SKIP_GEOSERVICES=1
       ;;
     --force-geoservices-us|--force-location-us|--force-geo-us)
-      DO_LOCATION_IP_FIX=1
       FORCE_GEOSERVICES_US=1
       ;;
+    --skip-countryd)
+      SKIP_COUNTRYD=1
+      ;;
+    --skip-apple-internal|--skip-apple-internal-variant|--skip-internal-variant)
+      SKIP_APPLE_INTERNAL=1
+      ;;
+    --skip-macos27-siri-ai|--skip-macos27-siri)
+      SKIP_MACOS27_SIRI_AI=1
+      ;;
     --skip-siri-location-icon)
-      DO_SIRI_LOCATION_ICON_RUNTIME_FIX=0
+      SKIP_SIRI_LOCATION_ICON=1
       ;;
     --skip-web-search)
-      DO_WEB_SEARCH_FIX=0
+      SKIP_WEB_SEARCH=1
       ;;
     -h|--help)
       usage
       exit 0
       ;;
     *)
-      echo "Unknown option: $1" >&2
-      usage >&2
-      exit 2
+      die "Unknown option: $1"
       ;;
   esac
   shift
 done
 
-section() {
-  echo
-  echo "== $1 =="
+if [[ "$(id -u)" != "0" ]]; then
+  log "Need administrator privileges. Re-running with sudo..."
+  sudo_args=("$ACTION")
+  [[ "$DRY_RUN" == "1" ]] && sudo_args+=(--dry-run)
+  [[ "$FORCE_GEOSERVICES_US" == "1" ]] && sudo_args+=(--force-geoservices-us)
+  [[ "$SKIP_KEXT" == "1" ]] && sudo_args+=(--skip-kext)
+  [[ "$SKIP_LAUNCHDAEMON" == "1" ]] && sudo_args+=(--skip-launchdaemon)
+  [[ "$SKIP_ELIGIBILITY" == "1" ]] && sudo_args+=(--skip-eligibility)
+  [[ "$SKIP_SAE" == "1" ]] && sudo_args+=(--skip-sae)
+  [[ "$SKIP_GEOSERVICES" == "1" ]] && sudo_args+=(--skip-location-ip)
+  [[ "$SKIP_COUNTRYD" == "1" ]] && sudo_args+=(--skip-countryd)
+  [[ "$SKIP_APPLE_INTERNAL" == "1" ]] && sudo_args+=(--skip-apple-internal)
+  [[ "$SKIP_MACOS27_SIRI_AI" == "1" ]] && sudo_args+=(--skip-macos27-siri-ai)
+  [[ "$SKIP_SIRI_LOCATION_ICON" == "1" ]] && sudo_args+=(--skip-siri-location-icon)
+  [[ "$SKIP_WEB_SEARCH" == "1" ]] && sudo_args+=(--skip-web-search)
+  if [[ "$ACTION" == "icon" ]]; then
+    sudo_args+=(--fix-siri-icon)
+  elif [[ "$DO_ICON_FIX" == "1" ]]; then
+    sudo_args+=(--all)
+  fi
+  exec sudo "$SELF" "${sudo_args[@]}"
+fi
+
+console_user() {
+  local user
+  user="$(/usr/bin/stat -f '%Su' /dev/console 2>/dev/null || true)"
+  [[ -n "$user" && "$user" != "root" && "$user" != "loginwindow" ]] && echo "$user"
 }
 
-require_path() {
-  local required_path="$1"
-  if [[ ! -e "$required_path" ]]; then
-    echo "Missing required path: $required_path" >&2
-    exit 1
-  fi
+console_uid() {
+  local user="$1"
+  /usr/bin/id -u "$user" 2>/dev/null || true
 }
 
-ensure_region_spoof_kext_installed() {
-  if [[ -d "$KEXT" ]]; then
-    return 0
-  fi
-
-  section "Install CodexRegionSpoof.kext"
-  if [[ ! -d "$LOCAL_KEXT" ]]; then
-    echo "Missing $KEXT and missing local bundle $LOCAL_KEXT" >&2
-    echo "Place CodexRegionSpoof.kext in tools/ or install it manually under /Library/Extensions." >&2
-    exit 1
-  fi
-
-  if [[ ! -x "$LOCAL_KEXT_BIN" && -f "$LOCAL_KEXT_BIN_B64" ]]; then
-    echo "Reconstructing local kext executable from base64 payload..."
-    /usr/bin/base64 -D -i "$LOCAL_KEXT_BIN_B64" -o "$LOCAL_KEXT_BIN"
-    chmod 755 "$LOCAL_KEXT_BIN"
-  fi
-
-  if [[ ! -x "$LOCAL_KEXT_BIN" ]]; then
-    echo "Missing local kext executable: $LOCAL_KEXT_BIN" >&2
-    exit 1
-  fi
-
-  echo "Installing $LOCAL_KEXT -> $KEXT"
-  run_root rm -rf "$KEXT"
-  run_root cp -R "$LOCAL_KEXT" "$KEXT"
-  run_root chown -R root:wheel "$KEXT"
-  run_root chmod -R go-w "$KEXT"
-  codesign -dv --verbose=2 "$KEXT" 2>&1 | grep -E 'Identifier=|Signature=|TeamIdentifier=' || true
+console_home() {
+  local user="$1"
+  /usr/bin/dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null |
+    /usr/bin/awk '{print $2; exit}'
 }
 
-sudo_keepalive_start() {
-  if [[ -n "${SUDO_PASSWORD:-}" ]]; then
-    printf '%s\n' "$SUDO_PASSWORD" | sudo -S -v
+CONSOLE_USER="$(console_user || true)"
+CONSOLE_UID=""
+CONSOLE_HOME=""
+if [[ -n "$CONSOLE_USER" ]]; then
+  CONSOLE_UID="$(console_uid "$CONSOLE_USER")"
+  CONSOLE_HOME="$(console_home "$CONSOLE_USER")"
+fi
+[[ -n "$CONSOLE_HOME" ]] || CONSOLE_HOME="/var/root"
+
+as_console_user() {
+  if [[ -n "$CONSOLE_USER" && -n "$CONSOLE_UID" ]]; then
+    /bin/launchctl asuser "$CONSOLE_UID" /usr/bin/sudo -u "$CONSOLE_USER" /usr/bin/env \
+      HOME="$CONSOLE_HOME" USER="$CONSOLE_USER" LOGNAME="$CONSOLE_USER" "$@"
   else
-    sudo -v
-  fi
-  while true; do
-    sudo -n true 2>/dev/null || exit
-    sleep 60
-  done &
-  SUDO_KEEPALIVE_PID=$!
-  trap 'kill ${SUDO_KEEPALIVE_PID:-0} 2>/dev/null || true' EXIT
-}
-
-run_root() {
-  if [[ "$(id -u)" == "0" ]]; then
     "$@"
-  elif [[ -n "${SUDO_PASSWORD:-}" ]]; then
-    printf '%s\n' "$SUDO_PASSWORD" | sudo -S "$@"
-  else
-    sudo "$@"
   fi
 }
 
 macos_major_version() {
   local version major
-  version="$(sw_vers -productVersion 2>/dev/null || echo 0)"
+  version="$(/usr/bin/sw_vers -productVersion 2>/dev/null || echo 0)"
   major="${version%%.*}"
-  if [[ "$major" != <-> ]]; then
-    major=0
-  fi
+  [[ "$major" == <-> ]] || major=0
   echo "$major"
 }
 
-find_system_volume_device() {
-  local root_dev sys_dev
-  root_dev="$(/sbin/mount | /usr/bin/awk '$3 == "/" {print $1; exit}')"
-  if [[ -z "$root_dev" ]]; then
-    echo "Could not determine root APFS snapshot device from mount output." >&2
-    return 1
-  fi
-
-  # On sealed-root macOS, / is usually mounted from a snapshot device such as
-  # /dev/disk3s5s1. The writable System volume is the parent, /dev/disk3s5.
-  sys_dev="$(printf '%s' "$root_dev" | /usr/bin/sed -E 's/(s[0-9]+)s[0-9]+$/\1/')"
-  echo "$sys_dev"
+sip_disabled() {
+  /usr/bin/csrutil status 2>/dev/null | /usr/bin/grep -qi disabled
 }
 
-mount_system_volume_rw() {
-  local mnt="$1"
-  local sys_dev
-  sys_dev="$(find_system_volume_device)"
-
-  run_root mkdir -p "$mnt"
-  if /sbin/mount | /usr/bin/grep -q " on ${mnt} "; then
-    return 0
-  fi
-
-  echo "Mounting System volume read-write:"
-  echo "  device: $sys_dev"
-  echo "  mount:  $mnt"
-  run_root /sbin/mount -t apfs -o nobrowse,rw "$sys_dev" "$mnt"
+amfi_disabled() {
+  /usr/sbin/nvram boot-args 2>/dev/null | /usr/bin/grep -q 'amfi_get_out_of_my_way'
 }
 
-apple_internal_variant_is_enabled() {
+kext_loaded() {
+  /usr/bin/kmutil showloaded --no-kernel-components 2>/dev/null |
+    /usr/bin/grep -qi 'CodexRegionSpoof\|RegionSpoof'
+}
+
+root_region_is_spoofed() {
+  /usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null |
+    /usr/bin/grep -qi '4c4c2f41'
+}
+
+country_origin_is_usa() {
+  /usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null |
+    /usr/bin/grep -qi '555341'
+}
+
+pb() {
+  /usr/libexec/PlistBuddy -c "$1" "$2"
+}
+
+ensure_plist_file() {
   local plist="$1"
-  [[ -f "$plist" ]] || return 1
-  /usr/libexec/PlistBuddy -c 'Print :AppleInternal' "$plist" 2>/dev/null |
-    grep -qi '^true$'
+  if [[ ! -e "$plist" ]]; then
+    /bin/mkdir -p "$(dirname "$plist")"
+    /usr/bin/plutil -create xml1 "$plist"
+  fi
 }
 
-pb_sudo() {
-  run_root /usr/libexec/PlistBuddy -c "$1" "$2"
+unlock_file() {
+  [[ -e "$1" ]] && /usr/bin/chflags nouchg "$1" 2>/dev/null || true
+}
+
+lock_file_eligibility() {
+  [[ -e "$1" ]] || return 0
+  /usr/sbin/chown root:_eligibilityd "$1" 2>/dev/null || /usr/sbin/chown root:wheel "$1" 2>/dev/null || true
+  /bin/chmod 0644 "$1" 2>/dev/null || true
+  /usr/bin/chflags uchg "$1" 2>/dev/null || true
+}
+
+print_sip_state() {
+  section "SIP / authenticated-root"
+  /usr/bin/csrutil status 2>&1 || true
+  /usr/bin/csrutil authenticated-root status 2>&1 || true
 }
 
 print_boot_policy() {
   section "Boot policy"
-  if command -v bputil >/dev/null 2>&1; then
-    run_root bputil -d 2>&1 | sed -n '/OS environment:/,/Boot Args Filtering Status/p' || true
+  /usr/sbin/bputil -d 2>&1 | /usr/bin/sed -n '/OS environment:/,/Boot Args Filtering Status/p' || true
+}
+
+print_root_identity() {
+  section "Root IORegistry identity"
+  /usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null |
+    /usr/bin/grep -Ei '"region-info"|"country-of-origin"|"model"|"model-number"|"regulatory-model-number"' || true
+}
+
+print_kext_state() {
+  section "Kext"
+  if [[ -d "$KEXT_DST" ]]; then
+    /usr/bin/codesign -dv --verbose=2 "$KEXT_DST" 2>&1 |
+      /usr/bin/grep -E 'Identifier=|Signature=|TeamIdentifier=' || true
+    /usr/bin/kmutil print-diagnostics -p "$KEXT_DST" 2>&1 | /usr/bin/sed -n '1,60p' || true
   else
-    echo "bputil not found"
+    log "$KEXT_DST not installed"
+  fi
+  log "-- loaded --"
+  /usr/bin/kmutil showloaded 2>/dev/null |
+    /usr/bin/grep -Ei 'Codex|RegionSpoof' || log "CodexRegionSpoof is not loaded"
+}
+
+print_eligibility_answers() {
+  section "Apple Intelligence eligibility answers"
+  for domain in "${ELIGIBILITYD_DOMAINS[@]}"; do
+    printf '%-48s ' "$domain"
+    pb "Print :${domain}:os_eligibility_answer_t" "$ELIGIBILITYD_PLIST" 2>/dev/null || echo "(missing)"
+  done
+  for domain in "${OS_ELIGIBILITY_DOMAINS[@]}"; do
+    printf '%-48s ' "$domain"
+    pb "Print :${domain}:os_eligibility_answer_t" "$OS_ELIGIBILITY_PLIST" 2>/dev/null || echo "(missing)"
+  done
+}
+
+print_country_state() {
+  section "countryd / GeoServices"
+  if [[ -e "$COUNTRYD_PLIST" ]]; then
+    /bin/ls -lO "$COUNTRYD_PLIST" 2>/dev/null || true
+    /usr/bin/plutil -p "$COUNTRYD_PLIST" 2>/dev/null |
+      /usr/bin/grep -E 'CountryCode|=> "US"|=> US' |
+      /usr/bin/head -40 || true
+  else
+    log "$COUNTRYD_PLIST not present"
+  fi
+  log "-- GeoServices --"
+  if [[ -e "$GEOSERVICES_DIRECT_STORE" ]]; then
+    /usr/bin/plutil -p "$GEOSERVICES_DIRECT_STORE" 2>/dev/null || true
+  else
+    log "$GEOSERVICES_DIRECT_STORE not present"
   fi
 }
 
-print_sip_state() {
-  section "SIP / SSV"
-  csrutil status 2>&1 || true
-  csrutil authenticated-root status 2>&1 || true
+print_macos27_state() {
+  section "macOS 27 Siri AI gates"
+  log "Current macOS major version: $(macos_major_version)"
+  if [[ -e "$APPLE_INTERNAL_VARIANT_PLIST" ]]; then
+    /bin/ls -lO "$APPLE_INTERNAL_VARIANT_PLIST" 2>/dev/null || true
+    /usr/bin/plutil -p "$APPLE_INTERNAL_VARIANT_PLIST" 2>/dev/null || true
+  else
+    log "$APPLE_INTERNAL_VARIANT_PLIST not present on live root"
+  fi
+  log "-- FeatureFlags override --"
+  if [[ -e "$GM_FEATUREFLAGS_OVERRIDE_PLIST" ]]; then
+    /usr/bin/plutil -p "$GM_FEATUREFLAGS_OVERRIDE_PLIST" 2>/dev/null || true
+  else
+    log "$GM_FEATUREFLAGS_OVERRIDE_PLIST not present"
+  fi
 }
 
-print_root_region_state() {
-  section "Root region state"
-  echo "-- NVRAM --"
-  nvram -p 2>/dev/null | grep -E '^(region-info|boot-args)' || true
-
-  echo
-  echo "-- IOPlatformExpertDevice --"
-  ioreg -rd1 -c IOPlatformExpertDevice |
-    grep -Ei '"region-info"|"country-of-origin"|"model"|"model-number"|"regulatory-model-number"' || true
-
-  echo
-  echo "-- kext install/authentication --"
-  if [[ -d "$KEXT" ]]; then
-    codesign -dv --verbose=2 "$KEXT" 2>&1 |
-      grep -E 'Identifier=|Authority=|TeamIdentifier=' || true
-    run_root kmutil print-diagnostics -p "$KEXT" 2>&1 | sed -n '1,80p' || true
+print_siri_state() {
+  section "SiriAvailability"
+  if [[ -n "$CONSOLE_USER" ]]; then
+    log "Console user: $CONSOLE_USER"
+    as_console_user /usr/bin/defaults read "$SIRI_DOMAIN" "$SIRI_KEY" 2>/dev/null || true
   else
-    echo "$KEXT not installed"
+    warn "No console user found"
+  fi
+}
+
+preflight_install() {
+  section "Preflight"
+  log "Workspace: $ROOT_DIR"
+  log "macOS: $(/usr/bin/sw_vers -productVersion 2>/dev/null || true)"
+  log "Console user: ${CONSOLE_USER:-none}"
+
+  [[ "$(/usr/bin/uname -m)" == "arm64" ]] || die "This project only supports Apple Silicon."
+
+  if ! sip_disabled; then
+    cat >&2 <<'MSG'
+SIP is still enabled. The bundled kext is ad-hoc signed and will not load.
+
+Boot to Recovery and run:
+
+  csrutil disable
+  csrutil authenticated-root disable
+
+Then open Startup Security Utility:
+
+  Reduced Security -> Allow user management of kernel extensions
+
+Reboot and run this script again.
+MSG
+    exit 1
   fi
 
-  echo
-  echo "-- loaded status --"
-  run_root kmutil showloaded 2>/dev/null | grep -E -i 'Codex|RegionSpoof' || echo "CodexRegionSpoof is not loaded"
+  if amfi_disabled; then
+    warn "boot-args contains amfi_get_out_of_my_way. Removing it because PCC cloud AI needs AMFI."
+    local args new_args
+    args="$(/usr/sbin/nvram boot-args 2>/dev/null | /usr/bin/sed 's/^boot-args[[:space:]]*//' || true)"
+    new_args="$(printf '%s' "$args" | /usr/bin/sed -E 's/amfi_get_out_of_my_way=[0-9]*//g' | /usr/bin/xargs || true)"
+    if [[ -z "$new_args" ]]; then
+      /usr/sbin/nvram -d boot-args 2>/dev/null || true
+    else
+      /usr/sbin/nvram boot-args="$new_args" 2>/dev/null || true
+    fi
+    warn "Reboot after this run so AMFI/PCC state is clean."
+  else
+    ok "AMFI boot-arg looks clean"
+  fi
 }
 
-load_region_spoof_kext() {
-  section "Load root region spoof kext"
-  ensure_region_spoof_kext_installed
+prepare_local_kext_copy() {
+  [[ -d "$LOCAL_KEXT" ]] || die "Missing local kext bundle: $LOCAL_KEXT"
 
-  run_root kmutil load -p "$KEXT" || true
+  local tmp
+  tmp="$(/usr/bin/mktemp -d /private/tmp/codex-kext.XXXXXX)"
+  /bin/cp -R "$LOCAL_KEXT" "$tmp/CodexRegionSpoof.kext"
 
-  echo
-  echo "-- kernel log --"
-  run_root dmesg | grep CodexRegionSpoof | tail -20 || true
+  if [[ ! -x "$tmp/CodexRegionSpoof.kext/Contents/MacOS/CodexRegionSpoof" ]]; then
+    if [[ -f "$tmp/CodexRegionSpoof.kext/Contents/MacOS/CodexRegionSpoof.b64" ]]; then
+      /usr/bin/base64 -D \
+        -i "$tmp/CodexRegionSpoof.kext/Contents/MacOS/CodexRegionSpoof.b64" \
+        -o "$tmp/CodexRegionSpoof.kext/Contents/MacOS/CodexRegionSpoof"
+      /bin/chmod 755 "$tmp/CodexRegionSpoof.kext/Contents/MacOS/CodexRegionSpoof"
+    else
+      die "Missing local kext executable and .b64 payload"
+    fi
+  fi
 
-  echo
-  echo "-- loaded status --"
-  run_root kmutil showloaded 2>/dev/null | grep -E -i 'Codex|RegionSpoof' || true
+  echo "$tmp/CodexRegionSpoof.kext"
+}
 
-  echo
-  echo "-- IORegistry after load --"
-  ioreg -rd1 -c IOPlatformExpertDevice |
-    grep -Ei '"region-info"|"country-of-origin"|"model"|"model-number"|"regulatory-model-number"' || true
+install_kext() {
+  section "Install/load CodexRegionSpoof.kext"
+  local prepared_kext
+  prepared_kext="$(prepare_local_kext_copy)"
+
+  /bin/rm -rf "$KEXT_DST"
+  /bin/cp -R "$prepared_kext" "$KEXT_DST"
+  /usr/sbin/chown -R root:wheel "$KEXT_DST"
+  /bin/chmod -R go-w "$KEXT_DST"
+
+  /usr/bin/codesign -dv --verbose=2 "$KEXT_DST" 2>&1 |
+    /usr/bin/grep -E 'Identifier=|Signature=|TeamIdentifier=' || true
+
+  if kext_loaded && root_region_is_spoofed && country_origin_is_usa; then
+    ok "kext already loaded and root identity is spoofed"
+    return 0
+  fi
+
+  /usr/bin/kmutil load -p "$KEXT_DST" 2>&1 || true
+
+  /bin/sleep 2
+  if root_region_is_spoofed && country_origin_is_usa; then
+    ok "root identity spoofed: region-info=LL/A, country-of-origin=USA"
+  else
+    cat <<'MSG'
+The kext was installed, but IORegistry is not spoofed yet.
+
+If this is the first load, open:
+
+  System Settings -> Privacy & Security
+
+Scroll to the bottom, allow the blocked system software/kernel extension, then
+reboot. The LaunchDaemon will load the kext automatically on next boot.
+MSG
+  fi
+
+  log "-- kernel log --"
+  /sbin/dmesg | /usr/bin/grep CodexRegionSpoof | /usr/bin/tail -20 || true
 }
 
 write_siri_location_icon_patch_payload() {
-  local locationd_tmp
-
-  locationd_tmp="$(mktemp)"
-
-  cat > "$locationd_tmp" <<'PY'
+  /bin/mkdir -p "$SIRI_LOCATION_FIX_DIR"
+  /bin/cat > "$SIRI_LOCATION_FIX_DIR/patch_locationd_skip_assistantd_association_lldb.py" <<'PY'
 """
-Runtime patch for the Location Services Siri identity.
+Runtime patch for Location Services' Siri identity.
 
-The real CoreLocation authorization identity for Siri is
-AssistantServices.framework. Its bundle still carries the old siri-osx.icns,
-so System Settings shows the old icon even though Apple Intelligence is active.
-
-Keep that authorization identity intact, but rewrite only the display BundlePath
-returned by locationd to /System/Applications/Siri.app. Also filter stale rows
-created by older experiments, such as com.apple.assistantd or CoreServices/Siri.
+CoreLocation often registers Siri through AssistantServices.framework. That
+framework still has the legacy Siri icon, so System Settings can show the old
+icon even after Apple Intelligence is active. The patch keeps the authorization
+identity but rewrites only the display BundlePath to /System/Applications/Siri.app
+and filters duplicate stale Siri rows.
 """
 
 import lldb
-
-
-METHOD = "syncgetCopyClients"
-CLASS = "CLClientManagerAdapter"
-
 
 EXPR = r'''
 @import Foundation;
@@ -455,7 +528,7 @@ Class cdxf_cls=(Class)NSClassFromString(@"CLClientManagerAdapter");
 SEL cdxf_sel=(SEL)NSSelectorFromString(@"syncgetCopyClients");
 Method cdxf_method=class_getInstanceMethod(cdxf_cls, cdxf_sel);
 static id (*cdxf_origCopyClients)(id,SEL) = NULL;
-if (cdxf_origCopyClients == NULL) {
+if (cdxf_origCopyClients == NULL && cdxf_method != NULL) {
   cdxf_origCopyClients=(id(*)(id,SEL))method_getImplementation(cdxf_method);
   id cdxf_block = ^id(id obj) {
     id cdxf_clients = cdxf_origCopyClients(obj, cdxf_sel);
@@ -465,8 +538,7 @@ if (cdxf_origCopyClients == NULL) {
       id cdxf_val = [(NSDictionary *)cdxf_clients objectForKey:cdxf_key];
       NSString *cdxf_keyLower = [[NSString stringWithFormat:@"%@", cdxf_key] lowercaseString];
       NSString *cdxf_valLower = [[NSString stringWithFormat:@"%@", cdxf_val] lowercaseString];
-      BOOL cdxf_isAssistantServices =
-        [cdxf_keyLower containsString:@"assistantservices.framework"];
+      BOOL cdxf_isAssistantServices = [cdxf_keyLower containsString:@"assistantservices.framework"];
 
       if ([cdxf_keyLower containsString:@"com.apple.assistantd"] ||
           [cdxf_keyLower containsString:@"assistant_service"] ||
@@ -495,9 +567,8 @@ if (cdxf_origCopyClients == NULL) {
   IMP cdxf_imp=imp_implementationWithBlock(cdxf_block);
   method_setImplementation(cdxf_method, cdxf_imp);
 }
-@"patched syncgetCopyClients Siri duplicate filter"
+@"patched syncgetCopyClients Siri display identity"
 '''
-
 
 def __lldb_init_module(debugger, _dict):
     target = debugger.GetSelectedTarget()
@@ -511,72 +582,33 @@ def __lldb_init_module(debugger, _dict):
         print(f"[patch-locationd-siri-filter] ERROR: {value.GetError() if value else 'invalid expression'}")
         return
 
-    print(f"[patch-locationd-siri-filter] patched {CLASS} {METHOD}")
+    print("[patch-locationd-siri-filter] patched CLClientManagerAdapter syncgetCopyClients")
     print(value.GetObjectDescription() or value.GetValue() or "")
 PY
-
-  run_root mkdir -p "$SIRI_LOCATION_FIX_DIR"
-  run_root rm -f "$SIRI_LOCATION_FIX_DIR/patch_assistant_effective_siri_location_lldb.py"
-  run_root install -o root -g wheel -m 644 "$locationd_tmp" "$SIRI_LOCATION_FIX_DIR/patch_locationd_skip_assistantd_association_lldb.py"
-  rm -f "$locationd_tmp"
+  /usr/sbin/chown -R root:wheel "$SIRI_LOCATION_FIX_DIR"
+  /bin/chmod 755 "$SIRI_LOCATION_FIX_DIR"
+  /bin/chmod 644 "$SIRI_LOCATION_FIX_DIR/patch_locationd_skip_assistantd_association_lldb.py"
 }
 
-install_siri_location_icon_payload() {
-  write_siri_location_icon_patch_payload
-}
-
-install_region_spoof_launchdaemon() {
-  section "Install boot-time kext loader"
-  ensure_region_spoof_kext_installed
-  install_siri_location_icon_payload
-
-  run_root mkdir -p /Library/Scripts/Codex
-
-  local tmp_script
-  tmp_script="$(mktemp)"
-  cat > "$tmp_script" <<'EOF'
-#!/bin/zsh
-set -u
-
-LOG="/var/log/codex-region-spoof-loader.log"
-KEXT="/Library/Extensions/CodexRegionSpoof.kext"
-SIRI_FIX_DIR="/Library/Scripts/Codex/SiriLocationIconFix"
-SIRI_LOCATIOND_PATCH="$SIRI_FIX_DIR/patch_locationd_skip_assistantd_association_lldb.py"
-ASSISTANTD_PLIST="/System/Library/LaunchAgents/com.apple.assistantd.plist"
-CLIENTS_PLIST="/var/db/locationd/clients.plist"
-FORCE_GEOSERVICES_US="__CODEX_FORCE_GEOSERVICES_US__"
-
-console_user() {
-  /usr/bin/stat -f '%Su' /dev/console 2>/dev/null || true
-}
-
-console_uid() {
-  local user="$1"
-  /usr/bin/id -u "$user" 2>/dev/null || true
-}
-
-clean_siri_location_rows_for_icon_fix() {
-  if [[ ! -f "$CLIENTS_PLIST" ]]; then
-    echo "Location Services clients plist not present yet; creating empty clients plist: $CLIENTS_PLIST"
-  fi
-
-  /usr/bin/python3 - "$CLIENTS_PLIST" <<'PY'
+clean_siri_location_rows() {
+  local clients_plist="/var/db/locationd/clients.plist"
+  /usr/bin/python3 - "$clients_plist" <<'PY'
+import grp
 import os
 import plistlib
-import grp
 import pwd
 import shutil
 import sys
 import time
 
-plist_path = sys.argv[1]
-if os.path.exists(plist_path):
-    with open(plist_path, "rb") as f:
+path = sys.argv[1]
+if os.path.exists(path):
+    with open(path, "rb") as f:
         data = plistlib.load(f)
 else:
     data = {}
 
-def is_siri_location_row(key, value):
+def is_stale_siri_row(key, value):
     key_text = str(key).lower()
     value_text = str(value).lower()
     if "assistantservices.framework" in key_text:
@@ -591,63 +623,39 @@ def is_siri_location_row(key, value):
         or "system/applications/siri.app" in text
     )
 
-remove_keys = [key for key, value in data.items() if is_siri_location_row(key, value)]
-
-backup = f"{plist_path}.backup-codex-siri-icon-{time.strftime('%Y%m%d-%H%M%S')}"
-if os.path.exists(plist_path):
-    shutil.copy2(plist_path, backup)
+remove_keys = [key for key, value in data.items() if is_stale_siri_row(key, value)]
+if os.path.exists(path):
+    shutil.copy2(path, f"{path}.backup-codex-siri-icon-{time.strftime('%Y%m%d-%H%M%S')}")
 for key in remove_keys:
     data.pop(key, None)
 
-tmp = f"{plist_path}.codex-tmp"
+tmp = f"{path}.codex-tmp"
 with open(tmp, "wb") as f:
     plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
 
-if os.path.exists(plist_path):
-    stat = os.stat(plist_path)
+if os.path.exists(path):
+    stat = os.stat(path)
     os.chown(tmp, stat.st_uid, stat.st_gid)
     os.chmod(tmp, stat.st_mode & 0o7777)
 else:
     os.chown(tmp, pwd.getpwnam("_locationd").pw_uid, grp.getgrnam("_locationd").gr_gid)
     os.chmod(tmp, 0o600)
-os.replace(tmp, plist_path)
-
-print(f"backup={backup}")
+os.replace(tmp, path)
 print(f"removed={len(remove_keys)}")
 for key in remove_keys:
     print(f"  {key}")
-print("kept natural AssistantServices.framework Siri row if present")
 PY
 }
 
-apply_siri_location_icon_fix() {
-  if [[ ! -f "$SIRI_LOCATIOND_PATCH" ]]; then
-    echo "Siri Location icon payload missing under $SIRI_FIX_DIR; skipping"
-    return 0
-  fi
+apply_siri_location_icon_runtime_fix_now() {
+  section "Location Services Siri icon runtime patch"
+  local patch="$SIRI_LOCATION_FIX_DIR/patch_locationd_skip_assistantd_association_lldb.py"
+  [[ -f "$patch" ]] || write_siri_location_icon_patch_payload
 
-  local user=""
-  local uid=""
-  for _ in {1..150}; do
-    user="$(console_user)"
-    if [[ -n "$user" && "$user" != "root" && "$user" != "loginwindow" ]]; then
-      uid="$(console_uid "$user")"
-      [[ -n "$uid" ]] && break
-    fi
-    /bin/sleep 2
-  done
-
-  if [[ -z "$uid" ]]; then
-    echo "No logged-in console user found; skipping Siri Location icon runtime fix"
-    return 0
-  fi
-
-  echo "applying Siri Location icon runtime fix for $user uid=$uid"
   /usr/bin/killall lldb debugserver 2>/dev/null || true
-
   /usr/bin/killall locationd 2>/dev/null || true
   /bin/sleep 1
-  clean_siri_location_rows_for_icon_fix || true
+  clean_siri_location_rows || true
   /bin/launchctl kickstart -k system/com.apple.locationd 2>/dev/null || true
   /bin/sleep 3
 
@@ -655,76 +663,69 @@ apply_siri_location_icon_fix() {
   locationd_pid="$(/usr/bin/pgrep -x locationd | /usr/bin/head -1 || true)"
   if [[ -n "$locationd_pid" ]]; then
     /usr/bin/lldb --batch -p "$locationd_pid" \
-      -o "command script import \"$SIRI_LOCATIOND_PATCH\"" \
+      -o "command script import \"$patch\"" \
       -o 'process detach' -o quit || true
   else
-    echo "locationd did not restart before patch attempt"
+    warn "locationd did not restart before patch attempt"
   fi
 
-  /bin/launchctl bootstrap "gui/$uid" "$ASSISTANTD_PLIST" 2>/dev/null || true
-  /bin/launchctl kickstart -k "gui/$uid/com.apple.assistantd" 2>/dev/null || true
-  /bin/sleep 3
-  clean_siri_location_rows_for_icon_fix || true
-
-  /usr/bin/killall "System Settings" SecurityPrivacyExtension cfprefsd iconservicesagent IconServicesAgent 2>/dev/null || true
+  if [[ -n "$CONSOLE_UID" ]]; then
+    /bin/launchctl bootstrap "gui/$CONSOLE_UID" /System/Library/LaunchAgents/com.apple.assistantd.plist 2>/dev/null || true
+    /bin/launchctl kickstart -k "gui/$CONSOLE_UID/com.apple.assistantd" 2>/dev/null || true
+  fi
+  clean_siri_location_rows || true
+  as_console_user /usr/bin/killall "System Settings" SecurityPrivacyExtension cfprefsd iconservicesagent IconServicesAgent 2>/dev/null || true
 }
 
-{
-  echo "==== $(date) ===="
-  echo "before:"
-  /usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice | /usr/bin/grep -Ei '"region-info"|"country-of-origin"' || true
+write_loader_script() {
+  local geo_mode="ip"
+  local siri_location_mode="1"
+  [[ "$SKIP_GEOSERVICES" == "1" ]] && geo_mode="skip"
+  [[ "$FORCE_GEOSERVICES_US" == "1" ]] && geo_mode="us"
+  [[ "$SKIP_SIRI_LOCATION_ICON" == "1" ]] && siri_location_mode="0"
 
-  if /usr/bin/kmutil showloaded 2>/dev/null | /usr/bin/grep -qi 'local.codex.RegionSpoof'; then
-    echo "CodexRegionSpoof already loaded"
+  /bin/mkdir -p /Library/Scripts/Codex
+  /bin/cat > "$LOADER_SCRIPT" <<EOF
+#!/bin/zsh
+set -u
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:\${PATH:-}"
+
+LOG="/var/log/codex-region-spoof-loader.log"
+KEXT="$KEXT_DST"
+GEO_MODE="$geo_mode"
+SIRI_LOCATION_ICON_MODE="$siri_location_mode"
+SIRI_LOCATIOND_PATCH="$SIRI_LOCATION_FIX_DIR/patch_locationd_skip_assistantd_association_lldb.py"
+CLIENTS_PLIST="/var/db/locationd/clients.plist"
+
+detect_geo() {
+  local cc ip city region loc json
+  if [[ "\$GEO_MODE" == "us" ]]; then
+    echo "US|forced|forced|forced|forced|forced to US by --force-geoservices-us"
+    return 0
+  fi
+  json="\$(/usr/bin/curl -s --max-time 8 https://ipinfo.io/json 2>/dev/null || true)"
+  if [[ -n "\$json" ]]; then
+    cc="\$(printf '%s' "\$json" | /usr/bin/python3 -c 'import json,sys; print((json.load(sys.stdin).get("country") or "US").upper())' 2>/dev/null || echo US)"
+    ip="\$(printf '%s' "\$json" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("ip","unknown"))' 2>/dev/null || echo unknown)"
+    city="\$(printf '%s' "\$json" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("city","unknown"))' 2>/dev/null || echo unknown)"
+    region="\$(printf '%s' "\$json" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("region","unknown"))' 2>/dev/null || echo unknown)"
+    loc="\$(printf '%s' "\$json" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("loc","unknown"))' 2>/dev/null || echo unknown)"
+    echo "\$cc|\$ip|\$city|\$region|\$loc|set from current public IP geolocation"
   else
-    echo "loading $KEXT"
-    /usr/bin/kmutil load -p "$KEXT" || true
+    echo "US|unknown|unknown|unknown|unknown|public IP lookup failed; fallback US"
   fi
+}
 
-  /bin/sleep 1
-  echo "after:"
-  /usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice | /usr/bin/grep -Ei '"region-info"|"country-of-origin"' || true
-  /usr/bin/kmutil showloaded 2>/dev/null | /usr/bin/grep -Ei 'Codex|RegionSpoof' || true
-
-  echo "restarting AI availability daemons"
-  /usr/bin/killall eligibilityd generativeexperiencesd modelcatalogd 2>/dev/null || true
-
-  SOURCE_NOTE="set from current public IP geolocation"
-  GEO_CC=""
-  GEO_IP=""
-  GEO_CITY=""
-  GEO_REGION=""
-  GEO_LOC=""
-  if [ "$FORCE_GEOSERVICES_US" = "1" ]; then
-    GEO_CC="US"
-    GEO_IP="forced"
-    GEO_CITY="forced"
-    GEO_REGION="forced"
-    GEO_LOC="forced"
-    SOURCE_NOTE="forced to US by --force-geoservices-us"
-    echo "forcing GeoServices location country cache to US"
-  elif /usr/bin/curl -s --max-time 8 https://ipinfo.io/json >/tmp/codex_geo_ip.json 2>/dev/null; then
-    echo "setting GeoServices location country cache from public IP"
-    GEO_CC="$(/usr/bin/python3 -c 'import json,sys; print((json.load(open("/tmp/codex_geo_ip.json")).get("country") or "").upper())' 2>/dev/null || true)"
-    GEO_IP="$(/usr/bin/python3 -c 'import json; print(json.load(open("/tmp/codex_geo_ip.json")).get("ip",""))' 2>/dev/null || true)"
-    GEO_CITY="$(/usr/bin/python3 -c 'import json; print(json.load(open("/tmp/codex_geo_ip.json")).get("city",""))' 2>/dev/null || true)"
-    GEO_REGION="$(/usr/bin/python3 -c 'import json; print(json.load(open("/tmp/codex_geo_ip.json")).get("region",""))' 2>/dev/null || true)"
-    GEO_LOC="$(/usr/bin/python3 -c 'import json; print(json.load(open("/tmp/codex_geo_ip.json")).get("loc",""))' 2>/dev/null || true)"
-  fi
-  if [ -z "$GEO_CC" ]; then
-    GEO_CC="US"
-    GEO_IP="unknown"
-    GEO_CITY="unknown"
-    GEO_REGION="unknown"
-    GEO_LOC="unknown"
-    echo "public IP lookup failed; falling back to GeoServices country US"
-  fi
-  /bin/mkdir -p /var/db/locationd/Library/Caches/GeoServices
-  /usr/bin/python3 - "$GEO_CC" "$GEO_IP" "$GEO_CITY" "$GEO_REGION" "$GEO_LOC" "$SOURCE_NOTE" <<'PY'
+write_geoservices() {
+  [[ "\$GEO_MODE" == "skip" ]] && return 0
+  local line cc ip city region loc source_note
+  line="\$(detect_geo)"
+  IFS='|' read -r cc ip city region loc source_note <<< "\$line"
+  /bin/mkdir -p "$GEOSERVICES_DIR"
+  /usr/bin/python3 - "$GEOSERVICES_DIRECT_STORE" "\$cc" "\$ip" "\$city" "\$region" "\$loc" "\$source_note" <<'PY'
 import plistlib
 import sys
-
-cc, ip, city, region, loc, source_note = sys.argv[1:7]
+path, cc, ip, city, region, loc, source_note = sys.argv[1:8]
 payload = {
     "DeviceCountryCodeSourced": {
         "cc": cc,
@@ -738,25 +739,127 @@ payload = {
         "source": 262,
     }
 }
-with open("/var/db/locationd/Library/Caches/GeoServices/DirectReadConfigStore.plist", "wb") as f:
+
+clean_siri_location_rows_for_icon_fix() {
+  [[ "\$SIRI_LOCATION_ICON_MODE" == "1" ]] || return 0
+  /usr/bin/python3 - "\$CLIENTS_PLIST" <<'PY'
+import grp
+import os
+import plistlib
+import pwd
+import shutil
+import sys
+import time
+
+path = sys.argv[1]
+if os.path.exists(path):
+    with open(path, "rb") as f:
+        data = plistlib.load(f)
+else:
+    data = {}
+
+def is_stale_siri_row(key, value):
+    key_text = str(key).lower()
+    value_text = str(value).lower()
+    if "assistantservices.framework" in key_text:
+        return False
+    text = f"{key_text}\n{value_text}"
+    return (
+        "assistantd" in text
+        or "assistant_service" in text
+        or "com.apple.siri" in text
+        or "assistantservices.framework" in text
+        or "coreservices/siri.app" in text
+        or "system/applications/siri.app" in text
+    )
+
+remove_keys = [key for key, value in data.items() if is_stale_siri_row(key, value)]
+if os.path.exists(path):
+    shutil.copy2(path, f"{path}.backup-codex-siri-icon-{time.strftime('%Y%m%d-%H%M%S')}")
+for key in remove_keys:
+    data.pop(key, None)
+tmp = f"{path}.codex-tmp"
+with open(tmp, "wb") as f:
+    plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
+if os.path.exists(path):
+    stat = os.stat(path)
+    os.chown(tmp, stat.st_uid, stat.st_gid)
+    os.chmod(tmp, stat.st_mode & 0o7777)
+else:
+    os.chown(tmp, pwd.getpwnam("_locationd").pw_uid, grp.getgrnam("_locationd").gr_gid)
+    os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+print(f"removed={len(remove_keys)}")
+PY
+}
+
+apply_siri_location_icon_fix() {
+  [[ "\$SIRI_LOCATION_ICON_MODE" == "1" ]] || return 0
+  [[ -f "\$SIRI_LOCATIOND_PATCH" ]] || return 0
+  /usr/bin/killall lldb debugserver 2>/dev/null || true
+  /usr/bin/killall locationd 2>/dev/null || true
+  /bin/sleep 1
+  clean_siri_location_rows_for_icon_fix || true
+  /bin/launchctl kickstart -k system/com.apple.locationd 2>/dev/null || true
+  /bin/sleep 3
+  local locationd_pid
+  locationd_pid="\$(/usr/bin/pgrep -x locationd | /usr/bin/head -1 || true)"
+  if [[ -n "\$locationd_pid" ]]; then
+    /usr/bin/lldb --batch -p "\$locationd_pid" \
+      -o "command script import \"\$SIRI_LOCATIOND_PATCH\"" \
+      -o 'process detach' -o quit || true
+  fi
+  clean_siri_location_rows_for_icon_fix || true
+  /usr/bin/killall "System Settings" SecurityPrivacyExtension cfprefsd iconservicesagent IconServicesAgent 2>/dev/null || true
+}
+with open(path, "wb") as f:
     plistlib.dump(payload, f)
 PY
-  /bin/rm -f /tmp/codex_geo_ip.json 2>/dev/null || true
-  /usr/sbin/chown _locationd:_locationd /var/db/locationd/Library/Caches/GeoServices/DirectReadConfigStore.plist 2>/dev/null || true
-  /bin/chmod 0644 /var/db/locationd/Library/Caches/GeoServices/DirectReadConfigStore.plist 2>/dev/null || true
-  /usr/bin/killall locationd geod routined 2>/dev/null || true
+  /usr/sbin/chown _locationd:_locationd "$GEOSERVICES_DIRECT_STORE" 2>/dev/null || true
+  /bin/chmod 0644 "$GEOSERVICES_DIRECT_STORE" 2>/dev/null || true
+}
+
+{
+  echo "==== \$(date) ===="
+  echo "-- before --"
+  /usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice | /usr/bin/grep -Ei '"region-info"|"country-of-origin"' || true
+
+  if ! /usr/bin/kmutil showloaded 2>/dev/null | /usr/bin/grep -qi 'Codex\\|RegionSpoof'; then
+    echo "loading \$KEXT"
+    /usr/bin/kmutil load -p "\$KEXT" || true
+  fi
+
+  for i in 1 2 3 4 5 6 7 8; do
+    /usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | /usr/bin/grep -qi '4c4c2f41' && break
+    /bin/sleep 1
+  done
+
+  echo "-- after --"
+  /usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice | /usr/bin/grep -Ei '"region-info"|"country-of-origin"' || true
+  /usr/bin/kmutil showloaded 2>/dev/null | /usr/bin/grep -Ei 'Codex|RegionSpoof' || true
+
+  write_geoservices
   apply_siri_location_icon_fix
-} >> "$LOG" 2>&1
+
+  echo "refreshing region and AI daemons"
+  /usr/bin/killall eligibilityd generativeexperiencesd modelcatalogd modelmanagerd countryd locationd geod routined 2>/dev/null || true
+  /bin/launchctl kickstart -k system/com.apple.eligibilityd 2>/dev/null || true
+  /bin/launchctl kickstart -k system/com.apple.modelcatalogd 2>/dev/null || true
+  /bin/launchctl kickstart -k system/com.apple.modelmanagerd 2>/dev/null || true
+} >> "\$LOG" 2>&1
 
 exit 0
 EOF
-  /usr/bin/perl -0pi -e "s/__CODEX_FORCE_GEOSERVICES_US__/${FORCE_GEOSERVICES_US}/g" "$tmp_script"
-  run_root install -o root -g wheel -m 755 "$tmp_script" "$LOADER_SCRIPT"
-  rm -f "$tmp_script"
+  /usr/sbin/chown root:wheel "$LOADER_SCRIPT"
+  /bin/chmod 755 "$LOADER_SCRIPT"
+}
 
-  local tmp_plist
-  tmp_plist="$(mktemp)"
-  cat > "$tmp_plist" <<EOF
+install_launchdaemon() {
+  section "Install boot-time loader"
+  [[ "$SKIP_SIRI_LOCATION_ICON" == "0" ]] && write_siri_location_icon_patch_payload
+  write_loader_script
+
+  /bin/cat > "$LOADER_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -765,11 +868,9 @@ EOF
   <string>local.codex.region-spoof-loader</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${LOADER_SCRIPT}</string>
+    <string>$LOADER_SCRIPT</string>
   </array>
   <key>RunAtLoad</key>
-  <true/>
-  <key>LaunchOnlyOnce</key>
   <true/>
   <key>StandardOutPath</key>
   <string>/var/log/codex-region-spoof-loader.stdout.log</string>
@@ -778,244 +879,122 @@ EOF
 </dict>
 </plist>
 EOF
-  run_root install -o root -g wheel -m 644 "$tmp_plist" "$LOADER_PLIST"
-  rm -f "$tmp_plist"
+  /usr/sbin/chown root:wheel "$LOADER_PLIST"
+  /bin/chmod 644 "$LOADER_PLIST"
 
-  run_root launchctl bootout system "$LOADER_PLIST" 2>/dev/null || true
-  run_root launchctl bootstrap system "$LOADER_PLIST" 2>/dev/null || true
-  run_root launchctl kickstart -k system/local.codex.region-spoof-loader 2>/dev/null || true
+  /bin/launchctl bootout system "$LOADER_PLIST" 2>/dev/null || true
+  /bin/launchctl bootstrap system "$LOADER_PLIST" 2>/dev/null || true
+  /bin/launchctl kickstart -k system/local.codex.region-spoof-loader 2>/dev/null || true
 
-  echo "Installed and started: $LOADER_PLIST"
-  echo "Log: /var/log/codex-region-spoof-loader.log"
-}
-
-unlock_plist() {
-  local plist="$1"
-  [[ -e "$plist" ]] || return 0
-  run_root chflags nouchg "$plist" 2>/dev/null || true
-}
-
-lock_plist() {
-  local plist="$1"
-  [[ -e "$plist" ]] || return 0
-  run_root chown root:_eligibilityd "$plist"
-  run_root chmod 0644 "$plist"
-  run_root chflags uchg "$plist"
+  ok "installed and started $LOADER_PLIST"
+  log "Log: /var/log/codex-region-spoof-loader.log"
 }
 
 ensure_domain() {
   local plist="$1"
   local domain="$2"
 
-  pb_sudo "Print :${domain}" "$plist" >/dev/null 2>&1 || pb_sudo "Add :${domain} dict" "$plist"
+  ensure_plist_file "$plist"
+  pb "Print :${domain}" "$plist" >/dev/null 2>&1 || pb "Add :${domain} dict" "$plist"
 
-  pb_sudo "Print :${domain}:os_eligibility_answer_source_t" "$plist" >/dev/null 2>&1 \
-    && pb_sudo "Set :${domain}:os_eligibility_answer_source_t 1" "$plist" \
-    || pb_sudo "Add :${domain}:os_eligibility_answer_source_t integer 1" "$plist"
+  pb "Print :${domain}:os_eligibility_answer_source_t" "$plist" >/dev/null 2>&1 \
+    && pb "Set :${domain}:os_eligibility_answer_source_t 1" "$plist" \
+    || pb "Add :${domain}:os_eligibility_answer_source_t integer 1" "$plist"
 
-  pb_sudo "Print :${domain}:os_eligibility_answer_t" "$plist" >/dev/null 2>&1 \
-    && pb_sudo "Set :${domain}:os_eligibility_answer_t 4" "$plist" \
-    || pb_sudo "Add :${domain}:os_eligibility_answer_t integer 4" "$plist"
+  pb "Print :${domain}:os_eligibility_answer_t" "$plist" >/dev/null 2>&1 \
+    && pb "Set :${domain}:os_eligibility_answer_t 4" "$plist" \
+    || pb "Add :${domain}:os_eligibility_answer_t integer 4" "$plist"
 
-  pb_sudo "Print :${domain}:status" "$plist" >/dev/null 2>&1 || pb_sudo "Add :${domain}:status dict" "$plist"
+  pb "Print :${domain}:status" "$plist" >/dev/null 2>&1 || pb "Add :${domain}:status dict" "$plist"
 }
 
-set_status_if_present_or_add() {
+set_status() {
   local plist="$1"
   local domain="$2"
   local input="$3"
-  pb_sudo "Print :${domain}:status:${input}" "$plist" >/dev/null 2>&1 \
-    && pb_sudo "Set :${domain}:status:${input} 3" "$plist" \
-    || pb_sudo "Add :${domain}:status:${input} integer 3" "$plist"
-}
-
-normalize_existing_status_values() {
-  local plist="$1"
-  local domain="$2"
-  local keys
-  keys=("${(@f)$(pb_sudo "Print :${domain}:status" "$plist" 2>/dev/null \
-    | sed -n 's/^[[:space:]]*\([^ =][^ =]*\)[[:space:]]*=.*/\1/p')}")
-
-  local key
-  for key in "${keys[@]}"; do
-    [[ "$key" == "Dict" || -z "$key" ]] && continue
-    pb_sudo "Set :${domain}:status:${key} 3" "$plist" >/dev/null 2>&1 || true
-  done
+  pb "Print :${domain}:status:${input}" "$plist" >/dev/null 2>&1 \
+    && pb "Set :${domain}:status:${input} 3" "$plist" \
+    || pb "Add :${domain}:status:${input} integer 3" "$plist"
 }
 
 patch_domain() {
   local plist="$1"
   local domain="$2"
-
   ensure_domain "$plist" "$domain"
-  normalize_existing_status_values "$plist" "$domain"
 
-  case "$domain" in
-    OS_ELIGIBILITY_DOMAIN_GREYMATTER)
-      set_status_if_present_or_add "$plist" "$domain" OS_ELIGIBILITY_INPUT_COUNTRY_BILLING
-      set_status_if_present_or_add "$plist" "$domain" OS_ELIGIBILITY_INPUT_COUNTRY_LOCATION
-      set_status_if_present_or_add "$plist" "$domain" OS_ELIGIBILITY_INPUT_DEVICE_AND_SIRI_LANGUAGE_MATCH
-      set_status_if_present_or_add "$plist" "$domain" OS_ELIGIBILITY_INPUT_DEVICE_CLASS
-      set_status_if_present_or_add "$plist" "$domain" OS_ELIGIBILITY_INPUT_DEVICE_LANGUAGE
-      set_status_if_present_or_add "$plist" "$domain" OS_ELIGIBILITY_INPUT_DEVICE_REGION_CODE
-      set_status_if_present_or_add "$plist" "$domain" OS_ELIGIBILITY_INPUT_EXTERNAL_BOOT_DRIVE
-      set_status_if_present_or_add "$plist" "$domain" OS_ELIGIBILITY_INPUT_GENERATIVE_MODEL_SYSTEM
-      set_status_if_present_or_add "$plist" "$domain" OS_ELIGIBILITY_INPUT_SHARED_IPAD
-      set_status_if_present_or_add "$plist" "$domain" OS_ELIGIBILITY_INPUT_SIRI_LANGUAGE
-      ;;
-    OS_ELIGIBILITY_DOMAIN_IRON)
-      set_status_if_present_or_add "$plist" "$domain" OS_ELIGIBILITY_INPUT_COUNTRY_BILLING
-      set_status_if_present_or_add "$plist" "$domain" OS_ELIGIBILITY_INPUT_COUNTRY_LOCATION
-      set_status_if_present_or_add "$plist" "$domain" OS_ELIGIBILITY_INPUT_DEVICE_CLASS
-      ;;
-    OS_ELIGIBILITY_DOMAIN_SWIFT_ASSIST|OS_ELIGIBILITY_DOMAIN_XCODE_LLM)
-      set_status_if_present_or_add "$plist" "$domain" OS_ELIGIBILITY_INPUT_DEVICE_CLASS
-      set_status_if_present_or_add "$plist" "$domain" OS_ELIGIBILITY_INPUT_DEVICE_REGION_CODE
-      set_status_if_present_or_add "$plist" "$domain" OS_ELIGIBILITY_INPUT_EXTERNAL_BOOT_DRIVE
-      ;;
-    OS_ELIGIBILITY_DOMAIN_STRONTIUM)
-      set_status_if_present_or_add "$plist" "$domain" OS_ELIGIBILITY_INPUT_DEVICE_CLASS
-      set_status_if_present_or_add "$plist" "$domain" OS_ELIGIBILITY_INPUT_DEVICE_REGION_CODE
-      ;;
-    *)
-      set_status_if_present_or_add "$plist" "$domain" OS_ELIGIBILITY_INPUT_DEVICE_REGION_CODE
-      ;;
-  esac
+  local inputs=(
+    OS_ELIGIBILITY_INPUT_COUNTRY_BILLING
+    OS_ELIGIBILITY_INPUT_COUNTRY_LOCATION
+    OS_ELIGIBILITY_INPUT_DEVICE_AND_SIRI_LANGUAGE_MATCH
+    OS_ELIGIBILITY_INPUT_DEVICE_CLASS
+    OS_ELIGIBILITY_INPUT_DEVICE_LANGUAGE
+    OS_ELIGIBILITY_INPUT_DEVICE_REGION_CODE
+    OS_ELIGIBILITY_INPUT_EXTERNAL_BOOT_DRIVE
+    OS_ELIGIBILITY_INPUT_GENERATIVE_MODEL_SYSTEM
+    OS_ELIGIBILITY_INPUT_SHARED_IPAD
+    OS_ELIGIBILITY_INPUT_SIRI_LANGUAGE
+  )
+
+  local input
+  for input in "${inputs[@]}"; do
+    set_status "$plist" "$domain" "$input"
+  done
 }
 
 patch_eligibility_domains() {
-  section "Patch Apple Intelligence eligibility domains"
-  local backup_dir="${ELIGIBILITY_BACKUP_BASE}/force-ai-domains-$(date +%Y%m%d-%H%M%S)"
+  section "Patch eligibility domains"
+  local backup_dir="$ELIGIBILITY_BACKUP_BASE/force-ai-domains-$(/bin/date +%Y%m%d-%H%M%S)"
+  /bin/mkdir -p "$backup_dir"
 
-  run_root mkdir -p "$backup_dir"
   for plist in "$ELIGIBILITYD_PLIST" "$OS_ELIGIBILITY_PLIST"; do
-    if [[ -e "$plist" ]]; then
-      run_root cp -p "$plist" "$backup_dir/$(basename "$(dirname "$plist")")-$(basename "$plist")"
-    fi
+    [[ -e "$plist" ]] && /bin/cp -p "$plist" "$backup_dir/$(basename "$(dirname "$plist")")-$(basename "$plist")"
+    unlock_file "$plist"
+    ensure_plist_file "$plist"
   done
-  echo "Backup: $backup_dir"
 
-  unlock_plist "$ELIGIBILITYD_PLIST"
-  unlock_plist "$OS_ELIGIBILITY_PLIST"
-
+  local domain
   for domain in "${ELIGIBILITYD_DOMAINS[@]}"; do
-    echo "  $domain -> ELIGIBLE"
+    log "  $domain -> ELIGIBLE"
     patch_domain "$ELIGIBILITYD_PLIST" "$domain"
   done
-
   for domain in "${OS_ELIGIBILITY_DOMAINS[@]}"; do
-    echo "  $domain -> ELIGIBLE"
+    log "  $domain -> ELIGIBLE"
     patch_domain "$OS_ELIGIBILITY_PLIST" "$domain"
   done
 
-  lock_plist "$ELIGIBILITYD_PLIST"
-  lock_plist "$OS_ELIGIBILITY_PLIST"
+  lock_file_eligibility "$ELIGIBILITYD_PLIST"
+  lock_file_eligibility "$OS_ELIGIBILITY_PLIST"
 
-  run_root launchctl kickstart -k system/com.apple.eligibilityd 2>/dev/null || run_root killall eligibilityd 2>/dev/null || true
-  notifyutil -p com.apple.os-eligibility-domain.change.greymatter 2>/dev/null || true
-  notifyutil -p com.apple.os-eligibility-domain.change.foundation-models 2>/dev/null || true
-  notifyutil -p com.apple.os-eligibility-domain.change.personal-qa 2>/dev/null || true
-  notifyutil -p com.apple.os-eligibility-domain.change.siri-with-app-intents 2>/dev/null || true
-  notifyutil -p com.apple.os-eligibility-domain.change.terbium 2>/dev/null || true
-  notifyutil -p com.apple.os-eligibility-domain.change.iron 2>/dev/null || true
-  notifyutil -p com.apple.os-eligibility-domain.change.strontium 2>/dev/null || true
-  notifyutil -p com.apple.os-eligibility-domain.change.swift-assist 2>/dev/null || true
-  notifyutil -p com.apple.os-eligibility-domain.change.xcode-llm 2>/dev/null || true
+  /bin/launchctl kickstart -k system/com.apple.eligibilityd 2>/dev/null || /usr/bin/killall eligibilityd 2>/dev/null || true
+  /usr/bin/notifyutil -p com.apple.os-eligibility-domain.change.greymatter 2>/dev/null || true
+  /usr/bin/notifyutil -p com.apple.os-eligibility-domain.change.foundation-models 2>/dev/null || true
+  ok "eligibility domains patched; backup: $backup_dir"
 }
 
-print_eligibility_answers() {
-  section "Apple Intelligence eligibility answers"
-  for domain in "${ELIGIBILITYD_DOMAINS[@]}"; do
-    printf '%-48s ' "$domain"
-    pb_sudo "Print :${domain}:os_eligibility_answer_t" "$ELIGIBILITYD_PLIST" 2>/dev/null || echo "(missing)"
-  done
-  for domain in "${OS_ELIGIBILITY_DOMAINS[@]}"; do
-    printf '%-48s ' "$domain"
-    pb_sudo "Print :${domain}:os_eligibility_answer_t" "$OS_ELIGIBILITY_PLIST" 2>/dev/null || echo "(missing)"
-  done
-}
-
-force_siri_sae_orchestration_mode() {
-  section "Force Siri SAE orchestration mode"
-  local mode="4"
-  local backup_dir="$ROOT_DIR/backups/siri-availability"
-  local ts
-  ts="$(date +%Y%m%d-%H%M%S)"
-
-  mkdir -p "$backup_dir"
-
-  echo "-- current SiriAvailability --"
-  defaults read "$SIRI_DOMAIN" "$SIRI_KEY" 2>/dev/null || true
-
-  if [[ -f "$SIRI_PREF" ]]; then
-    cp -p "$SIRI_PREF" "$backup_dir/${SIRI_DOMAIN}.${ts}.plist"
-    echo "Backup: $backup_dir/${SIRI_DOMAIN}.${ts}.plist"
-  fi
-
-  if /usr/libexec/PlistBuddy -c "Print :${SIRI_KEY}" "$SIRI_PREF" >/dev/null 2>&1; then
-    /usr/libexec/PlistBuddy -c "Set :${SIRI_KEY}:isAvailable true" "$SIRI_PREF" 2>/dev/null || true
-    /usr/libexec/PlistBuddy -c "Set :${SIRI_KEY}:desiredOrchestrationMode $mode" "$SIRI_PREF"
-    /usr/libexec/PlistBuddy -c "Set :${SIRI_KEY}:unavailabilityReasons 0" "$SIRI_PREF" 2>/dev/null || true
-  else
-    defaults write "$SIRI_DOMAIN" "$SIRI_KEY" -dict \
-      isAvailable -bool true \
-      siriLocale -string "en-US" \
-      desiredOrchestrationMode -int "$mode" \
-      unavailabilityReasons -int 0 \
-      allCapabilities -dict fullUODCapabilities -int 15 hybridCapabilities -int 9 saeCapabilities -int 7
-  fi
-
-  /usr/bin/plutil -convert binary1 "$SIRI_PREF" 2>/dev/null || true
-
-  killall cfprefsd 2>/dev/null || true
-  killall SiriNCService Siri SystemUIServer Dock 2>/dev/null || true
-  sleep 1
-
-  echo "-- new SiriAvailability --"
-  defaults read "$SIRI_DOMAIN" "$SIRI_KEY" 2>/dev/null || true
-
-  mirror_siri_availability_to_appleidsettings
-}
-
-mirror_siri_availability_to_appleidsettings() {
-  section "Mirror SiriAvailability into AppleIDSettings container"
-  local dst_dir backup_dir ts
-  dst_dir="$(dirname "$APPLEID_SETTINGS_SIRI_PREF")"
-  backup_dir="$ROOT_DIR/backups/appleidsettings-siri-availability"
-  ts="$(date +%Y%m%d-%H%M%S)"
-
-  if [[ ! -f "$SIRI_PREF" ]]; then
-    echo "Global SiriAvailability plist is missing: $SIRI_PREF"
+force_siri_sae() {
+  section "Force Siri SAE orchestration"
+  if [[ -z "$CONSOLE_USER" ]]; then
+    warn "No console user found; skipping user SiriAvailability"
     return 0
   fi
 
-  mkdir -p "$dst_dir" "$backup_dir"
-  if [[ -f "$APPLEID_SETTINGS_SIRI_PREF" ]]; then
-    cp -p "$APPLEID_SETTINGS_SIRI_PREF" "$backup_dir/${SIRI_DOMAIN}.AppleIDSettings.${ts}.plist"
-    echo "Backup: $backup_dir/${SIRI_DOMAIN}.AppleIDSettings.${ts}.plist"
-  fi
+  as_console_user /usr/bin/defaults write "$SIRI_DOMAIN" "$SIRI_KEY" -dict \
+    isAvailable -bool true \
+    siriLocale -string "en-US" \
+    desiredOrchestrationMode -int 4 \
+    unavailabilityReasons -int 0 \
+    allCapabilities -dict fullUODCapabilities -int 15 hybridCapabilities -int 9 saeCapabilities -int 7
 
-  cp -p "$SIRI_PREF" "$APPLEID_SETTINGS_SIRI_PREF"
-  chmod 600 "$APPLEID_SETTINGS_SIRI_PREF" 2>/dev/null || true
-  plutil -lint "$APPLEID_SETTINGS_SIRI_PREF" >/dev/null
-
-  echo "AppleIDSettings is sandboxed; its NSHomeDirectory is the container."
-  echo "Mirrored ${SIRI_DOMAIN}/${SIRI_KEY} so AOSUI can resolve the built-in"
-  echo "com.apple.application-icon.siri-intelligence icon for com.apple.siri."
-  killall AppleIDSettings "System Settings" cfprefsd iconservicesagent IconServicesAgent 2>/dev/null || true
+  as_console_user /usr/bin/killall cfprefsd SiriNCService Siri SystemUIServer Dock 2>/dev/null || true
+  as_console_user /usr/bin/defaults read "$SIRI_DOMAIN" "$SIRI_KEY" 2>/dev/null || true
 }
 
-detect_public_ip_geo() {
+detect_geo() {
+  if [[ "$FORCE_GEOSERVICES_US" == "1" ]]; then
+    GEO_IP_CC="US"; GEO_IP_ADDR="forced"; GEO_IP_CITY="forced"; GEO_IP_REGION="forced"; GEO_IP_LOC="forced"
+    return 0
+  fi
   local json cc ip city region loc
-  if [[ "${FORCE_GEOSERVICES_US:-0}" == "1" ]]; then
-    GEO_IP_CC="US"
-    GEO_IP_ADDR="forced"
-    GEO_IP_CITY="forced"
-    GEO_IP_REGION="forced"
-    GEO_IP_LOC="forced"
-    return 0
-  fi
-
   json="$(/usr/bin/curl -s --max-time 8 https://ipinfo.io/json 2>/dev/null || true)"
   if [[ -n "$json" ]]; then
     cc="$(printf '%s' "$json" | /usr/bin/python3 -c 'import json,sys; print((json.load(sys.stdin).get("country") or "").upper())' 2>/dev/null || true)"
@@ -1024,7 +1003,6 @@ detect_public_ip_geo() {
     region="$(printf '%s' "$json" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("region",""))' 2>/dev/null || true)"
     loc="$(printf '%s' "$json" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin).get("loc",""))' 2>/dev/null || true)"
   fi
-
   GEO_IP_CC="${cc:-US}"
   GEO_IP_ADDR="${ip:-unknown}"
   GEO_IP_CITY="${city:-unknown}"
@@ -1032,28 +1010,19 @@ detect_public_ip_geo() {
   GEO_IP_LOC="${loc:-unknown}"
 }
 
-pin_geoservices_location_country_from_ip() {
-  section "Set GeoServices location country"
-  detect_public_ip_geo
+write_geoservices_country() {
+  section "Set GeoServices country"
+  detect_geo
   local source_note="set from current public IP geolocation"
-  if [[ "${FORCE_GEOSERVICES_US:-0}" == "1" ]]; then
-    source_note="forced to US by --force-geoservices-us"
-  fi
+  [[ "$FORCE_GEOSERVICES_US" == "1" ]] && source_note="forced to US by --force-geoservices-us"
 
-  local backup_dir="/private/var/db/locationd_cache_backup/geo-ip-${GEO_IP_CC}-$(date +%Y%m%d-%H%M%S)"
+  local backup_dir="/private/var/db/locationd_cache_backup/geo-${GEO_IP_CC}-$(/bin/date +%Y%m%d-%H%M%S)"
+  /bin/mkdir -p "$GEOSERVICES_DIR" "$backup_dir"
+  [[ -e "$GEOSERVICES_DIRECT_STORE" ]] && /bin/cp -p "$GEOSERVICES_DIRECT_STORE" "$backup_dir/DirectReadConfigStore.plist.before"
 
-  run_root mkdir -p "$GEOSERVICES_DIR" "$backup_dir"
-  if [[ -e "$GEOSERVICES_DIRECT_STORE" ]]; then
-    run_root cp -p "$GEOSERVICES_DIRECT_STORE" "$backup_dir/DirectReadConfigStore.plist.before"
-    echo "Backup: $backup_dir/DirectReadConfigStore.plist.before"
-  fi
-
-  local tmp_store
-  tmp_store="$(mktemp)"
-  /usr/bin/python3 - "$tmp_store" "$GEO_IP_CC" "$GEO_IP_ADDR" "$GEO_IP_CITY" "$GEO_IP_REGION" "$GEO_IP_LOC" "$source_note" <<'PY'
+  /usr/bin/python3 - "$GEOSERVICES_DIRECT_STORE" "$GEO_IP_CC" "$GEO_IP_ADDR" "$GEO_IP_CITY" "$GEO_IP_REGION" "$GEO_IP_LOC" "$source_note" <<'PY'
 import plistlib
 import sys
-
 path, cc, ip, city, region, loc, source_note = sys.argv[1:8]
 payload = {
     "DeviceCountryCodeSourced": {
@@ -1071,252 +1040,220 @@ payload = {
 with open(path, "wb") as f:
     plistlib.dump(payload, f)
 PY
-  run_root install -o _locationd -g _locationd -m 0644 "$tmp_store" "$GEOSERVICES_DIRECT_STORE"
-  rm -f "$tmp_store"
+  /usr/sbin/chown _locationd:_locationd "$GEOSERVICES_DIRECT_STORE" 2>/dev/null || true
+  /bin/chmod 0644 "$GEOSERVICES_DIRECT_STORE" 2>/dev/null || true
+  /usr/bin/killall locationd geod routined Maps Weather CoreLocationAgent 2>/dev/null || true
 
-  if [[ "${FORCE_GEOSERVICES_US:-0}" == "1" ]]; then
-    echo "Forced GeoServices country: ${GEO_IP_CC}"
-  else
-    echo "Detected public IP country: ${GEO_IP_CC} (${GEO_IP_ADDR}, ${GEO_IP_CITY}, ${GEO_IP_REGION}, ${GEO_IP_LOC})"
-  fi
-  echo "-- GeoServices DirectReadConfigStore --"
-  run_root plutil -p "$GEOSERVICES_DIRECT_STORE" 2>/dev/null || true
-
-  killall Maps Weather 2>/dev/null || true
-  killall CoreLocationAgent 2>/dev/null || true
-  run_root killall locationd geod routined 2>/dev/null || true
-  echo "Set GeoServices location country cache. Reopen Maps/Weather and test current location."
+  log "GeoServices country: $GEO_IP_CC ($GEO_IP_ADDR, $GEO_IP_CITY, $GEO_IP_REGION, $GEO_IP_LOC)"
+  log "Backup: $backup_dir"
 }
 
-force_countryd_us_cache() {
-  section "Force countryd country cache to US"
-
+force_countryd_us() {
+  section "Force countryd cache to US"
   if [[ ! -e "$COUNTRYD_PLIST" ]]; then
-    echo "$COUNTRYD_PLIST not found; skipping countryd method-2 cache patch."
+    warn "$COUNTRYD_PLIST not found; skipping"
     return 0
   fi
 
-  local backup_dir="$COUNTRYD_BACKUP_BASE/force-us-$(date +%Y%m%d-%H%M%S)"
-  run_root mkdir -p "$backup_dir"
-  run_root cp -p "$COUNTRYD_PLIST" "$backup_dir/countryCodeCache.plist.before"
-  echo "Backup: $backup_dir/countryCodeCache.plist.before"
+  local backup_dir="$COUNTRYD_BACKUP_BASE/force-us-$(/bin/date +%Y%m%d-%H%M%S)"
+  /bin/mkdir -p "$backup_dir"
+  /bin/cp -p "$COUNTRYD_PLIST" "$backup_dir/countryCodeCache.plist.before"
+  unlock_file "$COUNTRYD_PLIST"
+  /bin/chmod 0644 "$COUNTRYD_PLIST" 2>/dev/null || true
 
-  local patcher
-  patcher="$(mktemp)"
-  cat > "$patcher" <<'PY'
+  /usr/bin/python3 - "$COUNTRYD_PLIST" <<'PY'
 import os
 import plistlib
 import sys
-
 path = sys.argv[1]
 with open(path, "rb") as f:
     data = plistlib.load(f)
-
 changed = 0
-
 def force_us(value):
     global changed
     if isinstance(value, dict):
         return {key: force_us(item) for key, item in value.items()}
     if isinstance(value, list):
         return [force_us(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(force_us(item) for item in value)
     if isinstance(value, str) and len(value) == 2 and value.isalpha() and value.isupper():
-        if value != "US":
-            changed += 1
+        changed += value != "US"
         return "US"
     return value
-
 data = force_us(data)
-tmp = f"{path}.codex-countryd-tmp"
+tmp = f"{path}.codex-tmp"
 with open(tmp, "wb") as f:
     plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
-
 stat = os.stat(path)
 os.chown(tmp, stat.st_uid, stat.st_gid)
 os.chmod(tmp, 0o644)
 os.replace(tmp, path)
-print(f"countryd two-letter country strings forced to US; changed={changed}")
+print(f"changed={changed}")
 PY
 
-  run_root chflags nouchg "$COUNTRYD_PLIST" 2>/dev/null || true
-  run_root chmod 0644 "$COUNTRYD_PLIST" 2>/dev/null || true
-  run_root /usr/bin/python3 "$patcher" "$COUNTRYD_PLIST"
-  rm -f "$patcher"
-
-  run_root chmod 0444 "$COUNTRYD_PLIST" 2>/dev/null || true
-  run_root chflags uchg "$COUNTRYD_PLIST" 2>/dev/null || true
-
-  echo "-- countryd countryCodeCache snapshot --"
-  run_root plutil -p "$COUNTRYD_PLIST" 2>/dev/null |
-    grep -E 'CountryCode|=> "US"|=> US' |
-    head -40 || true
-
-  run_root killall countryd 2>/dev/null || true
-  echo "Applied method-2 countryd cache patch and locked countryCodeCache.plist."
+  /bin/chmod 0444 "$COUNTRYD_PLIST" 2>/dev/null || true
+  /usr/bin/chflags uchg "$COUNTRYD_PLIST" 2>/dev/null || true
+  /usr/bin/killall countryd 2>/dev/null || true
+  ok "countryd cache forced to US; backup: $backup_dir"
 }
 
-install_apple_internal_variant_plist() {
-  section "AppleInternalVariant sealed-system marker"
+find_system_volume_device() {
+  local root_dev sys_dev
+  root_dev="$(/sbin/mount | /usr/bin/awk '$3 == "/" {print $1; exit}')"
+  [[ -n "$root_dev" ]] || die "Could not determine root APFS snapshot device"
+  sys_dev="$(printf '%s' "$root_dev" | /usr/bin/sed -E 's/(s[0-9]+)s[0-9]+$/\1/')"
+  echo "$sys_dev"
+}
 
-  local major_version
-  major_version="$(macos_major_version)"
-  if (( major_version < 27 )); then
-    echo "Current macOS major version is ${major_version}; skipping macOS 27-only AppleInternalVariant marker."
+mount_system_rw() {
+  local sys_dev
+  sys_dev="$(find_system_volume_device)"
+  /bin/mkdir -p "$SYSTEM_RW_MNT"
+  if ! /sbin/mount | /usr/bin/grep -q " on ${SYSTEM_RW_MNT} "; then
+    log "Mounting System volume read-write: $sys_dev -> $SYSTEM_RW_MNT"
+    /sbin/mount -t apfs -o nobrowse,rw "$sys_dev" "$SYSTEM_RW_MNT"
+  fi
+}
+
+apple_internal_enabled() {
+  [[ -f "$1" ]] || return 1
+  pb 'Print :AppleInternal' "$1" 2>/dev/null | /usr/bin/grep -qi true
+}
+
+install_apple_internal_variant() {
+  section "AppleInternalVariant marker"
+  local major mounted_plist backup_dir
+  major="$(macos_major_version)"
+  if (( major < 27 )); then
+    log "macOS major version is $major; skipping macOS 27-only AppleInternalVariant marker."
     return 0
   fi
-
-  if apple_internal_variant_is_enabled "$APPLE_INTERNAL_VARIANT_PLIST"; then
-    echo "Live root already has AppleInternalVariant enabled:"
-    echo "  $APPLE_INTERNAL_VARIANT_PLIST"
+  if apple_internal_enabled "$APPLE_INTERNAL_VARIANT_PLIST"; then
+    ok "live root already has AppleInternalVariant enabled"
     return 0
   fi
-
-  if ! csrutil authenticated-root status 2>/dev/null | grep -qi 'disabled'; then
+  if ! /usr/bin/csrutil authenticated-root status 2>/dev/null | /usr/bin/grep -qi disabled; then
     cat >&2 <<'MSG'
-AppleInternalVariant.plist must be written into the sealed System volume, but
-Authenticated Root is currently enabled and the live root is read-only.
+AppleInternalVariant.plist must be written into the sealed System volume.
+Authenticated Root is enabled, so this step cannot continue.
 
-Boot to Recovery first and run:
+Boot to Recovery and run:
 
   csrutil disable
   csrutil authenticated-root disable
 
-Then boot macOS and rerun this script. The script will mount the System volume,
-write /System/Library/CoreServices/AppleInternalVariant.plist, and create a new
-boot snapshot.
+Then boot macOS and rerun this script.
 MSG
     exit 1
   fi
 
-  local backup_dir mounted_plist tmp_plist
-  backup_dir="$APPLE_INTERNAL_VARIANT_BACKUP_BASE/backup-$(date +%Y%m%d-%H%M%S)"
+  backup_dir="$APPLE_INTERNAL_VARIANT_BACKUP_BASE/backup-$(/bin/date +%Y%m%d-%H%M%S)"
   mounted_plist="${SYSTEM_RW_MNT}${APPLE_INTERNAL_VARIANT_PLIST}"
-  tmp_plist="$(mktemp)"
+  /bin/mkdir -p "$backup_dir"
 
-  run_root mkdir -p "$backup_dir"
-  if [[ -e "$APPLE_INTERNAL_VARIANT_PLIST" ]]; then
-    run_root cp -p "$APPLE_INTERNAL_VARIANT_PLIST" "$backup_dir/AppleInternalVariant.live.before" 2>/dev/null || true
-  fi
-
-  mount_system_volume_rw "$SYSTEM_RW_MNT"
-
-  if [[ -e "$mounted_plist" ]]; then
-    run_root cp -p "$mounted_plist" "$backup_dir/AppleInternalVariant.snapshot.before" 2>/dev/null || true
-  fi
-
-  cat > "$tmp_plist" <<'PLIST'
+  mount_system_rw
+  [[ -e "$mounted_plist" ]] && /bin/cp -p "$mounted_plist" "$backup_dir/AppleInternalVariant.snapshot.before"
+  /bin/mkdir -p "$(dirname "$mounted_plist")"
+  /bin/cat > "$mounted_plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>AppleInternal</key>
-	<true/>
+  <key>AppleInternal</key>
+  <true/>
 </dict>
 </plist>
 PLIST
+  /usr/sbin/chown root:wheel "$mounted_plist"
+  /bin/chmod 0644 "$mounted_plist"
+  /usr/bin/plutil -lint "$mounted_plist"
 
-  run_root mkdir -p "$(dirname "$mounted_plist")"
-  run_root cp "$tmp_plist" "$mounted_plist"
-  rm -f "$tmp_plist"
-  run_root chown root:wheel "$mounted_plist"
-  run_root chmod 0644 "$mounted_plist"
-  run_root plutil -lint "$mounted_plist"
-
-  echo "Creating new sealed boot snapshot with AppleInternalVariant enabled..."
-  run_root bless --mount "$SYSTEM_RW_MNT" --create-snapshot --setBoot
-
-  echo "Backup: $backup_dir"
-  echo "AppleInternalVariant will become visible after reboot:"
-  echo "  $APPLE_INTERNAL_VARIANT_PLIST"
+  /usr/sbin/bless --mount "$SYSTEM_RW_MNT" --create-snapshot --setBoot
+  ok "AppleInternalVariant written; reboot required. Backup: $backup_dir"
 }
 
-install_macos27_siri_ai_featureflag_override() {
-  local major_version
-  major_version="$(macos_major_version)"
-
-  if (( major_version < 27 )); then
-    section "macOS 27 Siri AI feature flag"
-    echo "Current macOS major version is ${major_version}; skipping macOS 27-only EnhancedSiriWaitlist override."
+install_macos27_featureflag() {
+  section "macOS 27 EnhancedSiriWaitlist FeatureFlags"
+  local major backup_dir
+  major="$(macos_major_version)"
+  if (( major < 27 )); then
+    log "macOS major version is $major; skipping macOS 27-only FeatureFlags override."
     return 0
   fi
 
-  section "macOS 27 Siri AI feature flag"
-  echo "Installing FeatureFlags override:"
-  echo "  $GM_FEATUREFLAGS_OVERRIDE_PLIST"
-  echo "Setting GenerativeModels.EnhancedSiriWaitlist.Enabled = false"
+  backup_dir="$FEATUREFLAGS_BACKUP_BASE/generative-models-$(/bin/date +%Y%m%d-%H%M%S)"
+  /bin/mkdir -p "$FEATUREFLAGS_OVERRIDE_DIR" "$backup_dir"
+  [[ -e "$SYSTEM_GM_FEATUREFLAGS_PLIST" ]] && /bin/cp -p "$SYSTEM_GM_FEATUREFLAGS_PLIST" "$backup_dir/System.GenerativeModels.plist.before" 2>/dev/null || true
+  [[ -e "$GM_FEATUREFLAGS_OVERRIDE_PLIST" ]] && /bin/cp -p "$GM_FEATUREFLAGS_OVERRIDE_PLIST" "$backup_dir/Library.GenerativeModels.plist.before" 2>/dev/null || true
 
-  local backup_dir patcher
-  backup_dir="$FEATUREFLAGS_BACKUP_BASE/generative-models-$(date +%Y%m%d-%H%M%S)"
-  run_root mkdir -p "$FEATUREFLAGS_OVERRIDE_DIR" "$backup_dir"
-
-  if [[ -e "$SYSTEM_GM_FEATUREFLAGS_PLIST" ]]; then
-    run_root cp -p "$SYSTEM_GM_FEATUREFLAGS_PLIST" "$backup_dir/System.GenerativeModels.plist.before" 2>/dev/null || true
-  fi
-  if [[ -e "$GM_FEATUREFLAGS_OVERRIDE_PLIST" ]]; then
-    run_root cp -p "$GM_FEATUREFLAGS_OVERRIDE_PLIST" "$backup_dir/Library.GenerativeModels.plist.before"
-  fi
-  echo "Backup: $backup_dir"
-
-  patcher="$(mktemp)"
-  cat > "$patcher" <<'PY'
+  /usr/bin/python3 - "$GM_FEATUREFLAGS_OVERRIDE_PLIST" <<'PY'
 import os
 import plistlib
 import sys
-
 path = sys.argv[1]
 if os.path.exists(path):
     with open(path, "rb") as f:
         data = plistlib.load(f)
 else:
     data = {}
-
 if not isinstance(data, dict):
     data = {}
-
 entry = data.get("EnhancedSiriWaitlist")
 if not isinstance(entry, dict):
     entry = {}
 entry["Enabled"] = False
 data["EnhancedSiriWaitlist"] = entry
-
 tmp = f"{path}.codex-tmp"
 with open(tmp, "wb") as f:
     plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
 os.replace(tmp, path)
 PY
+  /usr/sbin/chown root:wheel "$GM_FEATUREFLAGS_OVERRIDE_PLIST"
+  /bin/chmod 0644 "$GM_FEATUREFLAGS_OVERRIDE_PLIST"
+  ok "FeatureFlags override installed; backup: $backup_dir"
+}
 
-  run_root /usr/bin/python3 "$patcher" "$GM_FEATUREFLAGS_OVERRIDE_PLIST"
-  rm -f "$patcher"
-  run_root chown root:wheel "$GM_FEATUREFLAGS_OVERRIDE_PLIST"
-  run_root chmod 0644 "$GM_FEATUREFLAGS_OVERRIDE_PLIST"
+mirror_siri_availability_to_appleidsettings() {
+  [[ -n "$CONSOLE_USER" ]] || return 0
+  section "Mirror SiriAvailability to AppleIDSettings"
 
-  echo "-- GenerativeModels FeatureFlags override --"
-  plutil -p "$GM_FEATUREFLAGS_OVERRIDE_PLIST" 2>/dev/null || true
+  local src="$CONSOLE_HOME/Library/Preferences/${SIRI_DOMAIN}.plist"
+  local dst="$CONSOLE_HOME/Library/Containers/com.apple.systempreferences.AppleIDSettings/Data/Library/Preferences/${SIRI_DOMAIN}.plist"
+  local backup_dir="$CONSOLE_HOME/Documents/Codex/appleidsettings-siri-availability-backups/$(/bin/date +%Y%m%d-%H%M%S)"
 
-  killall cfprefsd "System Settings" SiriPreferenceExtension SiriNCService Siri 2>/dev/null || true
-  run_root killall generativeexperiencesd modelcatalogd 2>/dev/null || true
-  echo "Installed macOS 27 Siri AI waitlist override. Reboot is recommended."
+  if [[ ! -f "$src" ]]; then
+    warn "Missing $src; skipping AppleIDSettings mirror"
+    return 0
+  fi
+
+  /bin/mkdir -p "$(dirname "$dst")" "$backup_dir"
+  [[ -f "$dst" ]] && /bin/cp -p "$dst" "$backup_dir/${SIRI_DOMAIN}.plist.before"
+  /bin/cp -p "$src" "$dst"
+  /usr/sbin/chown "$CONSOLE_USER":staff "$dst" 2>/dev/null || true
+  /bin/chmod 600 "$dst" 2>/dev/null || true
+  /usr/bin/plutil -lint "$dst" >/dev/null
+  ok "mirrored SiriAvailability into AppleIDSettings container"
 }
 
 force_web_search_provider_google() {
   section "Normalize Siri/Safari web search provider"
+  [[ -n "$CONSOLE_USER" ]] || { warn "No console user found; skipping web search provider"; return 0; }
 
-  defaults write NSGlobalDomain NSWebServicesProviderWebSearch -dict \
+  as_console_user /usr/bin/defaults write NSGlobalDomain NSWebServicesProviderWebSearch -dict \
     NSDefaultDisplayName Google \
     NSProviderIdentifier com.google.www \
     NSProviderIdentifier2 com.google.www
 
-  /usr/bin/python3 <<'PY'
+  /usr/bin/python3 - "$CONSOLE_HOME" <<'PY'
 import os
 import plistlib
 import shutil
+import sys
 import time
 
+home = sys.argv[1]
 paths = [
-    os.path.expanduser("~/Library/Containers/com.apple.Safari/Data/Library/Preferences/com.apple.Safari.plist"),
-    os.path.expanduser("~/Library/Preferences/com.apple.Safari.plist"),
+    os.path.join(home, "Library/Containers/com.apple.Safari/Data/Library/Preferences/com.apple.Safari.plist"),
+    os.path.join(home, "Library/Preferences/com.apple.Safari.plist"),
 ]
 
 for path in paths:
@@ -1328,26 +1265,21 @@ for path in paths:
     except Exception as exc:
         print(f"{path}: read failed: {exc}")
         continue
-
     recent = data.get("RecentWebSearches")
     if not isinstance(recent, list):
         print(f"{path}: no RecentWebSearches")
         continue
-
     kept = [item for item in recent if "baidu" not in str(item).lower()]
     removed = len(recent) - len(kept)
     if removed == 0:
         print(f"{path}: removed stale Baidu searches=0")
         continue
-
     backup = f"{path}.backup-codex-baidu-{time.strftime('%Y%m%d-%H%M%S')}"
     shutil.copy2(path, backup)
     data["RecentWebSearches"] = kept
-
     tmp = f"{path}.codex-tmp"
     with open(tmp, "wb") as f:
         plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
-
     stat = os.stat(path)
     os.chown(tmp, stat.st_uid, stat.st_gid)
     os.chmod(tmp, stat.st_mode & 0o7777)
@@ -1355,220 +1287,47 @@ for path in paths:
     print(f"{path}: removed stale Baidu searches={removed}, backup={backup}")
 PY
 
-  killall cfprefsd Safari assistantd SiriNCService Siri 2>/dev/null || true
-  echo "Web search provider:"
-  defaults read NSGlobalDomain NSWebServicesProviderWebSearch 2>/dev/null || true
+  as_console_user /usr/bin/killall cfprefsd Safari assistantd SiriNCService Siri 2>/dev/null || true
+  as_console_user /usr/bin/defaults read NSGlobalDomain NSWebServicesProviderWebSearch 2>/dev/null || true
 }
 
 restore_siri_menu_bar_extra() {
+  [[ -n "$CONSOLE_USER" ]] || return 0
   section "Restore Siri menu bar extra"
-  defaults write com.apple.systemuiserver menuExtras -array /System/Library/CoreServices/Siri.bundle
-  killall SystemUIServer 2>/dev/null || true
-  echo "Requested /System/Library/CoreServices/Siri.bundle in SystemUIServer menu extras."
+  as_console_user /usr/bin/defaults write com.apple.systemuiserver menuExtras -array /System/Library/CoreServices/Siri.bundle
+  as_console_user /usr/bin/killall SystemUIServer 2>/dev/null || true
 }
 
-refresh_ai_clients() {
-  section "Refresh AI clients"
-  run_root killall eligibilityd generativeexperiencesd modelcatalogd 2>/dev/null || true
-  killall "System Settings" SiriPreferenceExtension SiriNCService Siri SystemUIServer Dock cfprefsd 2>/dev/null || true
-  notifyutil -p com.apple.os-eligibility-domain.change.greymatter 2>/dev/null || true
-  notifyutil -p com.apple.gms.availability.notification.private 2>/dev/null || true
-  sleep 2
-}
-
-clean_siri_location_rows_now() {
-  local cleaner="/tmp/codex_fix_siri_location_clean_clients.py"
-  local clients_plist="/var/db/locationd/clients.plist"
-
-  if [[ ! -f "$clients_plist" ]]; then
-    echo "Location Services clients plist not present yet; creating empty clients plist: $clients_plist"
-  fi
-
-  cat > "$cleaner" <<'PY'
-import os
-import plistlib
-import grp
-import pwd
-import shutil
-import sys
-import time
-
-plist_path = sys.argv[1]
-
-if os.path.exists(plist_path):
-    with open(plist_path, "rb") as f:
-        data = plistlib.load(f)
-else:
-    data = {}
-
-def is_siri_location_row(key, value):
-    key_text = str(key).lower()
-    value_text = str(value).lower()
-    if "assistantservices.framework" in key_text:
-        return False
-    text = f"{key_text}\n{value_text}"
-    return (
-        "assistantd" in text
-        or "assistant_service" in text
-        or "com.apple.siri" in text
-        or "assistantservices.framework" in text
-        or "coreservices/siri.app" in text
-        or "system/applications/siri.app" in text
-    )
-
-remove_keys = [key for key, value in data.items() if is_siri_location_row(key, value)]
-
-backup = f"{plist_path}.backup-codex-siri-icon-{time.strftime('%Y%m%d-%H%M%S')}"
-if os.path.exists(plist_path):
-    shutil.copy2(plist_path, backup)
-
-for key in remove_keys:
-    data.pop(key, None)
-
-tmp = f"{plist_path}.codex-tmp"
-with open(tmp, "wb") as f:
-    plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
-
-if os.path.exists(plist_path):
-    stat = os.stat(plist_path)
-    os.chown(tmp, stat.st_uid, stat.st_gid)
-    os.chmod(tmp, stat.st_mode & 0o7777)
-else:
-    os.chown(tmp, pwd.getpwnam("_locationd").pw_uid, grp.getgrnam("_locationd").gr_gid)
-    os.chmod(tmp, 0o600)
-os.replace(tmp, plist_path)
-
-print(f"backup={backup}")
-print(f"removed={len(remove_keys)}")
-for key in remove_keys:
-    print(f"  {key}")
-print("kept natural AssistantServices.framework Siri row if present")
-PY
-
-  run_root /usr/bin/python3 "$cleaner" "$clients_plist"
-  rm -f "$cleaner"
-}
-
-apply_siri_location_icon_runtime_fix_now() {
-  section "Apply Location Services Siri icon runtime fix now"
-
-  local locationd_patch="$SIRI_LOCATION_FIX_DIR/patch_locationd_skip_assistantd_association_lldb.py"
-  local assistantd_label="gui/$(id -u)/com.apple.assistantd"
-  local assistantd_plist="/System/Library/LaunchAgents/com.apple.assistantd.plist"
-  local locationd_lldb_log="/tmp/codex_fix_siri_location_icon_locationd.log"
-  local clients_dump="/tmp/codex_fix_siri_location_clients.txt"
-  local locationd_pid
-  local spe_pid
-
-  if [[ ! -f "$locationd_patch" ]]; then
-    echo "Missing Location Services Siri icon patch scripts; skipping immediate runtime fix."
-    return 0
-  fi
-
-  echo "== 1. Remove stale derived Siri Location Services rows =="
-  run_root /usr/bin/killall lldb debugserver 2>/dev/null || true
-
-  echo
-  echo "== 2. Restart and patch locationd client-list output =="
-  run_root /usr/bin/killall locationd 2>/dev/null || true
-  sleep 1
-  clean_siri_location_rows_now || true
-  run_root /bin/launchctl kickstart -k system/com.apple.locationd 2>/dev/null || true
-  sleep 3
-
-  locationd_pid="$(pgrep -x locationd | head -1 || true)"
-  if [[ -z "$locationd_pid" ]]; then
-    echo "locationd did not restart; skipping immediate locationd patch."
-  else
-    rm -f "$locationd_lldb_log"
-    run_root /usr/bin/lldb --batch -p "$locationd_pid" \
-      -o "command script import \"$locationd_patch\"" \
-      -o 'process detach' -o quit > "$locationd_lldb_log" 2>&1 || true
-    tail -30 "$locationd_lldb_log" || true
-  fi
-
-  echo
-  echo "== 3. Keep assistantd running so Launchpad Siri remains functional =="
-  launchctl bootstrap "gui/$(id -u)" "$assistantd_plist" 2>/dev/null || true
-  launchctl kickstart -k "$assistantd_label" 2>/dev/null || true
-  sleep 2
-  clean_siri_location_rows_now || true
-
-  echo
-  echo "== 4. Restart UI and trigger Location Services reload =="
-  killall "System Settings" SecurityPrivacyExtension cfprefsd iconservicesagent IconServicesAgent 2>/dev/null || true
-  sleep 2
-
-  echo
-  echo "== 5. Verify CoreLocation identities =="
-  spe_pid="$(pgrep -f 'SecurityPrivacyExtension.appex.*SecurityPrivacyExtension' | head -1 || true)"
-  if [[ -n "$spe_pid" ]]; then
-    /usr/bin/lldb --batch -p "$spe_pid" \
-      -o 'expr -l objc++ -O -- [NSClassFromString(@"CLLocationManager") userLocationClientsWithInfo]' \
-      -o 'process detach' -o quit > "$clients_dump" 2>&1 || true
-    grep -Ei 'AssistantServices.framework|System/Applications/Siri.app|CoreServices/Siri.app|assistantd|assistant_service|com.apple.Siri' "$clients_dump" || true
-    echo "CoreLocation dump: $clients_dump"
-  else
-    echo "SecurityPrivacyExtension is not running; open Location Services to visually verify."
-  fi
-}
-
-install_siri_location_icon_runtime_fix() {
-  section "Integrate Location Services Siri icon runtime fix"
-
-  install_siri_location_icon_payload
-
-  if [[ -f "$SIRI_LOCATION_FIX_AGENT" ]]; then
-    launchctl bootout "gui/$(id -u)" "$SIRI_LOCATION_FIX_AGENT" 2>/dev/null || true
-    rm -f "$SIRI_LOCATION_FIX_AGENT"
-    echo "Removed old standalone LaunchAgent: $SIRI_LOCATION_FIX_AGENT"
-  fi
-
-  run_root rm -f /Library/Scripts/Codex/SiriLocationIconFix/run-siri-location-icon-fix.sh 2>/dev/null || true
-  run_root rm -f /Library/Scripts/Codex/SiriLocationIconFix/fix_siri_location_icon_oneclick.sh 2>/dev/null || true
-
-  apply_siri_location_icon_runtime_fix_now || true
-
-  echo "Siri Location icon fix payload is now used by: $LOADER_SCRIPT"
-}
-
-patch_siri_launchpad_icon_source() {
-  section "Refresh Siri icon identity used by com.apple.siri"
-  local backup_dir="$HOME/Documents/Codex/siri-icon-source-backups/$(date +%Y%m%d-%H%M%S)"
-  local probe_log="$backup_dir/iconservices-probe.txt"
+refresh_siri_icon_identity() {
+  section "Refresh Siri icon identity"
+  [[ -n "$CONSOLE_USER" ]] || { warn "No console user found; skipping Siri icon refresh"; return 0; }
 
   mirror_siri_availability_to_appleidsettings
 
-  mkdir -p "$backup_dir"
-  cp "$SIRI_SYSTEM_APP/Contents/Info.plist" "$backup_dir/SystemApplications.Siri.Info.plist.live" 2>/dev/null || true
-  cp "$SIRI_CORESERVICES_APP/Contents/Info.plist" "$backup_dir/CoreServices.Siri.Info.plist.live" 2>/dev/null || true
+  local backup_dir="$CONSOLE_HOME/Documents/Codex/siri-icon-source-backups/$(/bin/date +%Y%m%d-%H%M%S)"
+  local probe_log="$backup_dir/iconservices-probe.txt"
+  /bin/mkdir -p "$backup_dir"
+  /bin/cp "$SIRI_SYSTEM_APP/Contents/Info.plist" "$backup_dir/SystemApplications.Siri.Info.plist.live" 2>/dev/null || true
+  /bin/cp "$SIRI_CORESERVICES_APP/Contents/Info.plist" "$backup_dir/CoreServices.Siri.Info.plist.live" 2>/dev/null || true
 
-  echo "-- Live Siri identity sources --"
-  echo "User-facing Siri app:"
+  log "-- Siri identity sources --"
   /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$SIRI_SYSTEM_APP/Contents/Info.plist" 2>/dev/null || true
   /usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$SIRI_SYSTEM_APP/Contents/Info.plist" 2>/dev/null || true
   /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$SIRI_SYSTEM_APP/Contents/Info.plist" 2>/dev/null || true
-  echo "Legacy service Siri app still used by AOSUI/iCloud lists:"
   /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$SIRI_CORESERVICES_APP/Contents/Info.plist" 2>/dev/null || true
   /usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$SIRI_CORESERVICES_APP/Contents/Info.plist" 2>/dev/null || true
   /usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$SIRI_CORESERVICES_APP/Contents/Info.plist" 2>/dev/null || true
 
-  echo
-  echo "AOSUI/iCloud asks for com.apple.siri. On a working system, IconServices"
-  echo "aliases that app icon to Apple's built-in content type:"
-  echo "  com.apple.application-icon.siri-intelligence"
-  echo "No generated image or copied .icns is used here."
-  echo
-  echo "Refreshing LaunchServices/IconServices caches..."
-  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -kill -r -domain local -domain system -domain user >/dev/null 2>&1 || true
-  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$SIRI_SYSTEM_APP" || true
-  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$SIRI_CORESERVICES_APP" || true
-  /usr/bin/mdimport "$SIRI_SYSTEM_APP" || true
-  /usr/bin/mdimport "$SIRI_CORESERVICES_APP" || true
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+    -kill -r -domain local -domain system -domain user >/dev/null 2>&1 || true
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$SIRI_SYSTEM_APP" >/dev/null 2>&1 || true
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$SIRI_CORESERVICES_APP" >/dev/null 2>&1 || true
+  /usr/bin/mdimport "$SIRI_SYSTEM_APP" >/dev/null 2>&1 || true
+  /usr/bin/mdimport "$SIRI_CORESERVICES_APP" >/dev/null 2>&1 || true
   /usr/bin/qlmanage -r cache >/dev/null 2>&1 || true
-  killall iconservicesagent IconServicesAgent Dock "System Settings" AppleIDSettings cfprefsd 2>/dev/null || true
+  as_console_user /usr/bin/killall iconservicesagent IconServicesAgent Dock "System Settings" AppleIDSettings cfprefsd 2>/dev/null || true
 
-  if /usr/bin/swift - > "$probe_log" <<'SWIFT'
+  as_console_user /usr/bin/swift - > "$probe_log" <<'SWIFT' || true
 import AppKit
 
 let paths = [
@@ -1588,385 +1347,169 @@ for path in paths {
 
 exit(ok ? 0 : 2)
 SWIFT
-  then
-    :
-  else
-    true
-  fi
-  cat "$probe_log"
-  if ! grep -q 'com.apple.application-icon.siri-intelligence' "$probe_log"; then
-    echo
-    echo "WARNING: IconServices did not report the Siri Apple Intelligence type."
-    echo "Do not replace icons by hand. First verify Apple Intelligence availability"
-    echo "and rerun after reboot/login."
-  fi
 
-  echo "Backup: $backup_dir"
+  /bin/cat "$probe_log" 2>/dev/null || true
+  if ! /usr/bin/grep -q 'com.apple.application-icon.siri-intelligence' "$probe_log" 2>/dev/null; then
+    warn "IconServices did not report siri-intelligence yet. Reboot/relogin and verify Apple Intelligence availability first."
+  fi
+  log "Backup: $backup_dir"
 }
 
-uninstall_run() {
-  echo "+ $*"
-  if [[ "$DO_UNINSTALL_DRY_RUN" == "0" ]]; then
+refresh_ai_daemons() {
+  section "Refresh AI daemons"
+  /usr/bin/killall eligibilityd generativeexperiencesd modelcatalogd modelmanagerd 2>/dev/null || true
+  /bin/launchctl kickstart -k system/com.apple.eligibilityd 2>/dev/null || true
+  /bin/launchctl kickstart -k system/com.apple.modelcatalogd 2>/dev/null || true
+  /bin/launchctl kickstart -k system/com.apple.modelmanagerd 2>/dev/null || true
+  [[ -n "$CONSOLE_USER" ]] && as_console_user /usr/bin/killall "System Settings" SiriPreferenceExtension SiriNCService Siri cfprefsd 2>/dev/null || true
+}
+
+run_status() {
+  section "Summary"
+  log "Script: $SELF"
+  log "macOS: $(/usr/bin/sw_vers -productVersion 2>/dev/null || true)"
+  log "Console user: ${CONSOLE_USER:-none}"
+  print_sip_state
+  print_boot_policy
+  print_root_identity
+  print_kext_state
+  print_eligibility_answers
+  print_country_state
+  print_macos27_state
+  print_siri_state
+}
+
+run_install() {
+  preflight_install
+  print_sip_state
+
+  [[ "$SKIP_KEXT" == "0" ]] && install_kext
+  [[ "$SKIP_LAUNCHDAEMON" == "0" ]] && install_launchdaemon
+  [[ "$SKIP_ELIGIBILITY" == "0" ]] && patch_eligibility_domains
+  [[ "$SKIP_SAE" == "0" ]] && force_siri_sae
+  [[ "$SKIP_GEOSERVICES" == "0" ]] && write_geoservices_country
+  [[ "$SKIP_COUNTRYD" == "0" ]] && force_countryd_us
+  [[ "$SKIP_APPLE_INTERNAL" == "0" ]] && install_apple_internal_variant
+  [[ "$SKIP_MACOS27_SIRI_AI" == "0" ]] && install_macos27_featureflag
+  [[ "$SKIP_WEB_SEARCH" == "0" ]] && force_web_search_provider_google
+  [[ "$SKIP_SIRI_LOCATION_ICON" == "0" ]] && apply_siri_location_icon_runtime_fix_now
+  refresh_ai_daemons
+  restore_siri_menu_bar_extra
+  [[ "$DO_ICON_FIX" == "1" ]] && refresh_siri_icon_identity
+
+  run_status
+  section "Done"
+  cat <<'MSG'
+Reboot after the first successful run, especially if:
+  - you just allowed the kext in Privacy & Security
+  - AMFI boot-args were removed
+  - AppleInternalVariant was written on macOS 27+
+  - AI assets are still downloading
+
+After everything works, the recommended higher-security recovery setting is:
+  csrutil authenticated-root enable
+  FileVault on
+
+Do not run csrutil enable while relying on this ad-hoc kext.
+MSG
+}
+
+backup_for_uninstall() {
+  BACKUP_ROOT="$CONSOLE_HOME/Documents/Codex/enableAppleIntelligence-restore-backups/$(/bin/date +%Y%m%d-%H%M%S)"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "Dry run backup root would be: $BACKUP_ROOT"
+    return 0
+  fi
+  /bin/mkdir -p "$BACKUP_ROOT"
+  for p in "$KEXT_DST" "$LOADER_SCRIPT" "$LOADER_PLIST" "$SIRI_LOCATION_FIX_DIR" "$ELIGIBILITYD_PLIST" "$OS_ELIGIBILITY_PLIST" "$COUNTRYD_PLIST" "$GEOSERVICES_DIRECT_STORE" "$GM_FEATUREFLAGS_OVERRIDE_PLIST"; do
+    [[ -e "$p" ]] || continue
+    /bin/mkdir -p "$BACKUP_ROOT$(dirname "$p")"
+    /bin/cp -a "$p" "$BACKUP_ROOT$p" 2>/dev/null || true
+  done
+  run_status > "$BACKUP_ROOT/status-before.txt" 2>&1 || true
+  log "Backup: $BACKUP_ROOT"
+}
+
+do_or_print() {
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "+ $*"
+  else
     "$@"
   fi
 }
 
-uninstall_run_root() {
-  echo "+ sudo $*"
-  if [[ "$DO_UNINSTALL_DRY_RUN" == "0" ]]; then
-    run_root "$@"
+remove_apple_internal_variant() {
+  section "Remove AppleInternalVariant marker"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "+ remove $APPLE_INTERNAL_VARIANT_PLIST from mounted System volume and bless new snapshot"
+    return 0
   fi
-}
-
-uninstall_backup_path() {
-  local src="$1"
-  local dst="$UNINSTALL_BACKUP_ROOT$src"
-  if [[ -e "$src" ]]; then
-    uninstall_run mkdir -p "$(dirname "$dst")"
-    uninstall_run_root cp -a "$src" "$dst"
+  if ! /usr/bin/csrutil authenticated-root status 2>/dev/null | /usr/bin/grep -qi disabled; then
+    warn "Authenticated Root is enabled; skipping sealed-system AppleInternalVariant removal."
+    warn "To remove it, boot Recovery, run csrutil authenticated-root disable, boot back, rerun uninstall."
+    return 0
   fi
-}
-
-uninstall_backup_state() {
-  section "Back up current state"
-  uninstall_run mkdir -p "$UNINSTALL_BACKUP_ROOT"
-
-  uninstall_backup_path "$KEXT"
-  uninstall_backup_path "$LOADER_SCRIPT"
-  uninstall_backup_path "$LOADER_PLIST"
-  uninstall_backup_path "$SIRI_LOCATION_FIX_DIR"
-  uninstall_backup_path "$SIRI_LOCATION_FIX_AGENT"
-  uninstall_backup_path "$APPLEID_SETTINGS_SIRI_PREF"
-  uninstall_backup_path "$ELIGIBILITYD_PLIST"
-  uninstall_backup_path "$OS_ELIGIBILITY_PLIST"
-  uninstall_backup_path "$COUNTRYD_PLIST"
-  uninstall_backup_path "$GM_FEATUREFLAGS_OVERRIDE_PLIST"
-
-  if [[ "$DO_UNINSTALL_DRY_RUN" == "0" ]]; then
-    {
-      echo "== date =="
-      date
-      echo
-      echo "== csrutil =="
-      csrutil status 2>&1 || true
-      csrutil authenticated-root status 2>&1 || true
-      echo
-      echo "== IOPlatformExpertDevice =="
-      ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | grep -Ei '"region-info"|"country-of-origin"|"model"|"model-number"' || true
-      echo
-      echo "== loaded kext =="
-      run_root kmutil showloaded 2>/dev/null | grep -Ei 'Codex|RegionSpoof' || true
-      echo
-      echo "== GMS defaults =="
-      defaults read com.apple.gms.availability 2>/dev/null || true
-      echo
-      echo "== SiriAvailability =="
-      defaults read com.apple.assistant.backedup SiriAvailability 2>/dev/null || true
-      echo
-      echo "== generative assistant settings =="
-      defaults read com.apple.siri.generativeassistantsettings 2>/dev/null || true
-    } > "$UNINSTALL_BACKUP_ROOT/state-before.txt"
-  fi
-
-  echo "Backup directory: $UNINSTALL_BACKUP_ROOT"
-}
-
-uninstall_remove_launch_items() {
-  section "Remove launch items"
-  uninstall_run_root launchctl bootout system "$LOADER_PLIST" 2>/dev/null || true
-  uninstall_run_root rm -f "$LOADER_PLIST"
-  uninstall_run_root rm -f "$LOADER_SCRIPT"
-  uninstall_run_root rm -rf "$SIRI_LOCATION_FIX_DIR"
-
-  if [[ -f "$SIRI_LOCATION_FIX_AGENT" ]]; then
-    uninstall_run launchctl bootout "gui/$(id -u)" "$SIRI_LOCATION_FIX_AGENT" 2>/dev/null || true
-    uninstall_run rm -f "$SIRI_LOCATION_FIX_AGENT"
-  fi
-}
-
-uninstall_remove_kext() {
-  section "Unload and remove CodexRegionSpoof.kext"
-  if [[ -d "$KEXT" ]]; then
-    uninstall_run_root kmutil unload -p "$KEXT" 2>/dev/null || true
-    uninstall_run_root rm -rf "$KEXT"
+  local mounted_plist="${SYSTEM_RW_MNT}${APPLE_INTERNAL_VARIANT_PLIST}"
+  mount_system_rw
+  if [[ -e "$mounted_plist" ]]; then
+    /bin/rm -f "$mounted_plist"
+    /usr/sbin/bless --mount "$SYSTEM_RW_MNT" --create-snapshot --setBoot
+    ok "removed AppleInternalVariant from new boot snapshot; reboot required"
   else
-    echo "$KEXT not installed"
+    log "$mounted_plist not present"
   fi
 }
 
-uninstall_clear_eligibility_cache() {
-  section "Clear forced eligibility caches"
-  for plist in "$ELIGIBILITYD_PLIST" "$OS_ELIGIBILITY_PLIST"; do
-    if [[ -e "$plist" ]]; then
-      uninstall_run_root chflags nouchg "$plist" 2>/dev/null || true
-      uninstall_run_root rm -f "$plist"
-      echo "Removed $plist; eligibilityd will recompute it."
-    else
-      echo "$plist not present"
-    fi
+run_uninstall() {
+  section "Uninstall / restore"
+  backup_for_uninstall
+
+  do_or_print /bin/launchctl bootout system "$LOADER_PLIST" 2>/dev/null || true
+  do_or_print /bin/rm -f "$LOADER_PLIST" "$LOADER_SCRIPT"
+  do_or_print /bin/rm -rf "$SIRI_LOCATION_FIX_DIR"
+
+  if [[ -d "$KEXT_DST" ]]; then
+    do_or_print /usr/bin/kmutil unload -p "$KEXT_DST" 2>/dev/null || true
+    do_or_print /bin/rm -rf "$KEXT_DST"
+  fi
+
+  for plist in "$ELIGIBILITYD_PLIST" "$OS_ELIGIBILITY_PLIST" "$COUNTRYD_PLIST"; do
+    [[ -e "$plist" ]] || continue
+    do_or_print /usr/bin/chflags nouchg "$plist" 2>/dev/null || true
   done
-}
+  for plist in "$ELIGIBILITYD_PLIST" "$OS_ELIGIBILITY_PLIST"; do
+    [[ -e "$plist" ]] && do_or_print /bin/rm -f "$plist"
+  done
 
-uninstall_unlock_countryd_cache() {
-  section "Unlock countryd country cache"
-  if [[ -e "$COUNTRYD_PLIST" ]]; then
-    uninstall_run_root chflags nouchg "$COUNTRYD_PLIST" 2>/dev/null || true
-    uninstall_run_root chmod 0644 "$COUNTRYD_PLIST" 2>/dev/null || true
-    echo "Unlocked $COUNTRYD_PLIST. The cache is not deleted; countryd may refresh it later."
-  else
-    echo "$COUNTRYD_PLIST not present"
-  fi
-}
+  [[ -e "$GM_FEATUREFLAGS_OVERRIDE_PLIST" ]] && do_or_print /bin/rm -f "$GM_FEATUREFLAGS_OVERRIDE_PLIST"
+  remove_apple_internal_variant
 
-uninstall_clear_apple_internal_variant() {
-  section "Clear AppleInternalVariant sealed-system marker"
-
-  if [[ "$DO_UNINSTALL_DRY_RUN" == "1" ]]; then
-    echo "+ remove $APPLE_INTERNAL_VARIANT_PLIST from a mounted System volume and create a new boot snapshot"
-    return 0
+  if [[ -n "$CONSOLE_USER" ]]; then
+    do_or_print as_console_user /usr/bin/defaults delete "$SIRI_DOMAIN" "$SIRI_KEY" 2>/dev/null || true
   fi
 
-  if ! csrutil authenticated-root status 2>/dev/null | grep -qi 'disabled'; then
-    cat <<'MSG'
-Authenticated Root is enabled, so the sealed System volume cannot be modified
-from the live OS. To remove AppleInternalVariant.plist, boot Recovery and run:
-
-  csrutil authenticated-root disable
-
-Then boot macOS and rerun:
-
-  ./enable_apple_intelligence_oneclick.sh --uninstall
-MSG
-    return 0
-  fi
-
-  local backup_dir mounted_plist
-  backup_dir="$APPLE_INTERNAL_VARIANT_BACKUP_BASE/uninstall-$(date +%Y%m%d-%H%M%S)"
-  mounted_plist="${SYSTEM_RW_MNT}${APPLE_INTERNAL_VARIANT_PLIST}"
-  run_root mkdir -p "$backup_dir"
-
-  mount_system_volume_rw "$SYSTEM_RW_MNT"
-
-  if [[ ! -e "$mounted_plist" ]]; then
-    echo "$mounted_plist not present in mounted System volume"
-    return 0
-  fi
-
-  run_root cp -p "$mounted_plist" "$backup_dir/AppleInternalVariant.snapshot.before-remove" 2>/dev/null || true
-  run_root rm -f "$mounted_plist"
-
-  echo "Creating new sealed boot snapshot after removing AppleInternalVariant..."
-  run_root bless --mount "$SYSTEM_RW_MNT" --create-snapshot --setBoot
-  echo "Backup: $backup_dir"
-  echo "Reboot is required for removal to become the live root."
-}
-
-uninstall_clear_macos27_featureflag_override() {
-  section "Clear macOS 27 Siri AI FeatureFlags override"
-  if [[ ! -e "$GM_FEATUREFLAGS_OVERRIDE_PLIST" ]]; then
-    echo "$GM_FEATUREFLAGS_OVERRIDE_PLIST not present"
-    return 0
-  fi
-
-  local cleaner
-  cleaner="$(mktemp)"
-  cat > "$cleaner" <<'PY'
-import os
-import plistlib
-import sys
-
-path = sys.argv[1]
-with open(path, "rb") as f:
-    data = plistlib.load(f)
-
-if isinstance(data, dict):
-    data.pop("EnhancedSiriWaitlist", None)
-else:
-    data = {}
-
-if data:
-    tmp = f"{path}.codex-tmp"
-    with open(tmp, "wb") as f:
-        plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
-    os.replace(tmp, path)
-else:
-    os.remove(path)
-PY
-
-  if [[ "$DO_UNINSTALL_DRY_RUN" == "0" ]]; then
-    run_root /usr/bin/python3 "$cleaner" "$GM_FEATUREFLAGS_OVERRIDE_PLIST"
-    if [[ -e "$GM_FEATUREFLAGS_OVERRIDE_PLIST" ]]; then
-      run_root chown root:wheel "$GM_FEATUREFLAGS_OVERRIDE_PLIST" 2>/dev/null || true
-      run_root chmod 0644 "$GM_FEATUREFLAGS_OVERRIDE_PLIST" 2>/dev/null || true
-    fi
-  else
-    echo "+ sudo /usr/bin/python3 <remove EnhancedSiriWaitlist> $GM_FEATUREFLAGS_OVERRIDE_PLIST"
-  fi
-  rm -f "$cleaner"
-}
-
-uninstall_clear_user_defaults() {
-  section "Clear user-level Apple Intelligence force defaults"
-  uninstall_run defaults delete com.apple.gms.availability 2>/dev/null || true
-  uninstall_run defaults delete com.apple.siri.generativeassistantsettings isEnabled 2>/dev/null || true
-  uninstall_run defaults delete com.apple.assistant.backedup SiriAvailability 2>/dev/null || true
-  uninstall_run rm -f "$APPLEID_SETTINGS_SIRI_PREF"
-}
-
-uninstall_restart_services() {
-  section "Restart related services"
-  uninstall_run_root killall eligibilityd generativeexperiencesd modelcatalogd 2>/dev/null || true
-  uninstall_run killall "System Settings" SiriPreferenceExtension SiriNCService Siri SystemUIServer Dock cfprefsd 2>/dev/null || true
-}
-
-uninstall_print_final_state() {
-  section "Current state after uninstall attempt"
-  csrutil status 2>&1 || true
-  csrutil authenticated-root status 2>&1 || true
-  echo
-  ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | grep -Ei '"region-info"|"country-of-origin"|"model"|"model-number"' || true
-  echo
-  if [[ "$DO_UNINSTALL_DRY_RUN" == "0" ]]; then
-    run_root kmutil showloaded 2>/dev/null | grep -Ei 'Codex|RegionSpoof' || echo "CodexRegionSpoof not loaded"
-  fi
-}
-
-run_uninstall_restore() {
-  section "Apple Intelligence uninstall / restore"
-  echo "Workspace: $ROOT_DIR"
-  echo "Dry run: $DO_UNINSTALL_DRY_RUN"
-  echo "This will remove the kext, clear forced eligibility caches, and unlock countryd cache. Reboot is required."
-
-  if [[ "$DO_UNINSTALL_DRY_RUN" == "0" ]]; then
-    sudo_keepalive_start
-  fi
-
-  uninstall_backup_state
-  uninstall_remove_launch_items
-  uninstall_remove_kext
-  uninstall_clear_eligibility_cache
-  uninstall_unlock_countryd_cache
-  uninstall_clear_apple_internal_variant
-  uninstall_clear_macos27_featureflag_override
-  uninstall_clear_user_defaults
-  uninstall_restart_services
-  uninstall_print_final_state
+  do_or_print /usr/bin/killall eligibilityd generativeexperiencesd modelcatalogd modelmanagerd countryd locationd 2>/dev/null || true
+  run_status
 
   section "Next steps"
-  cat <<EOF
-1. Reboot.
-2. Check root identity:
-   ioreg -rd1 -c IOPlatformExpertDevice | grep -Ei 'region-info|country-of-origin'
-
-3. If you want Apple Pay / highest security back, enter Recovery and set:
-   - Full Security
-   - csrutil enable
-   - csrutil authenticated-root enable
-
-Backup saved at:
-  $UNINSTALL_BACKUP_ROOT
-EOF
+  log "Reboot. If you want full stock security back, set Full Security, csrutil enable, and csrutil authenticated-root enable in Recovery."
 }
 
-final_hints() {
-  echo
-  echo "Useful verification commands:"
-  echo "  ./enable_apple_intelligence_oneclick.sh --verify-only"
-  echo "  defaults read com.apple.assistant.backedup SiriAvailability"
-  echo "  sudo tail -100 /var/log/codex-region-spoof-loader.log"
-}
-
-section "Preflight"
-echo "Workspace: $ROOT_DIR"
-echo "macOS: $(sw_vers -productVersion 2>/dev/null || true)"
-
-if [[ "$DO_UNINSTALL" == "1" ]]; then
-  run_uninstall_restore
-  exit 0
-fi
-
-if [[ "$DO_VERIFY_ONLY" == "0" && ( "$DO_LOAD_KEXT" == "1" || "$DO_INSTALL_LAUNCHDAEMON" == "1" || "$DO_ELIGIBILITY" == "1" || "$DO_LOCATION_IP_FIX" == "1" || "$DO_COUNTRYD_US" == "1" || "$DO_APPLE_INTERNAL_VARIANT" == "1" || "$DO_MACOS27_SIRI_AI" == "1" ) ]]; then
-  section "sudo"
-  echo "Requesting sudo once for kext/eligibility/system-snapshot operations..."
-  sudo_keepalive_start
-fi
-
-print_sip_state
-
-if [[ "$DO_ICON_ONLY" == "1" ]]; then
-  patch_siri_launchpad_icon_source
-  final_hints
-  echo
-  echo "Done. Reopen Launchpad after Dock/IconServices restarts."
-  exit 0
-fi
-
-print_root_region_state
-
-if [[ "$DO_VERIFY_ONLY" == "1" ]]; then
-  print_eligibility_answers
-  section "countryd countryCodeCache"
-  if [[ -e "$COUNTRYD_PLIST" ]]; then
-    ls -lO "$COUNTRYD_PLIST" 2>/dev/null || true
-    run_root plutil -p "$COUNTRYD_PLIST" 2>/dev/null |
-      grep -E 'CountryCode|=> "US"|=> US' |
-      head -40 || true
-  else
-    echo "$COUNTRYD_PLIST not present"
-  fi
-  section "AppleInternalVariant"
-  if [[ -e "$APPLE_INTERNAL_VARIANT_PLIST" ]]; then
-    ls -lO "$APPLE_INTERNAL_VARIANT_PLIST" 2>/dev/null || true
-    plutil -p "$APPLE_INTERNAL_VARIANT_PLIST" 2>/dev/null || true
-  else
-    echo "$APPLE_INTERNAL_VARIANT_PLIST not present on the live root"
-  fi
-  section "macOS 27 GenerativeModels FeatureFlags override"
-  echo "Current macOS major version: $(macos_major_version)"
-  if [[ -e "$SYSTEM_GM_FEATUREFLAGS_PLIST" ]]; then
-    echo "-- system GenerativeModels.plist EnhancedSiriWaitlist --"
-    /usr/libexec/PlistBuddy -c "Print :EnhancedSiriWaitlist" "$SYSTEM_GM_FEATUREFLAGS_PLIST" 2>/dev/null || echo "No system EnhancedSiriWaitlist key"
-  else
-    echo "$SYSTEM_GM_FEATUREFLAGS_PLIST not present"
-  fi
-  if [[ -e "$GM_FEATUREFLAGS_OVERRIDE_PLIST" ]]; then
-    echo "-- override GenerativeModels.plist --"
-    plutil -p "$GM_FEATUREFLAGS_OVERRIDE_PLIST" 2>/dev/null || true
-  else
-    echo "$GM_FEATUREFLAGS_OVERRIDE_PLIST not present"
-  fi
-  section "SiriAvailability"
-  defaults read "$SIRI_DOMAIN" "$SIRI_KEY" 2>/dev/null || true
-  final_hints
-  exit 0
-fi
-
-[[ "$DO_LOAD_KEXT" == "1" ]] && load_region_spoof_kext
-[[ "$DO_INSTALL_LAUNCHDAEMON" == "1" ]] && install_region_spoof_launchdaemon
-[[ "$DO_ELIGIBILITY" == "1" ]] && patch_eligibility_domains
-[[ "$DO_SAE" == "1" ]] && force_siri_sae_orchestration_mode
-[[ "$DO_LOCATION_IP_FIX" == "1" ]] && pin_geoservices_location_country_from_ip
-[[ "$DO_COUNTRYD_US" == "1" ]] && force_countryd_us_cache
-[[ "$DO_APPLE_INTERNAL_VARIANT" == "1" ]] && install_apple_internal_variant_plist
-[[ "$DO_MACOS27_SIRI_AI" == "1" ]] && install_macos27_siri_ai_featureflag_override
-[[ "$DO_WEB_SEARCH_FIX" == "1" ]] && force_web_search_provider_google
-[[ "$DO_SIRI_LOCATION_ICON_RUNTIME_FIX" == "1" ]] && install_siri_location_icon_runtime_fix
-
-if [[ "$DO_ICON_ONLY" == "0" ]]; then
-  refresh_ai_clients
-  restore_siri_menu_bar_extra
-fi
-[[ "$DO_ICON_FIX" == "1" ]] && patch_siri_launchpad_icon_source
-
-section "Final verification snapshot"
-print_root_region_state
-print_eligibility_answers
-section "SiriAvailability"
-defaults read "$SIRI_DOMAIN" "$SIRI_KEY" 2>/dev/null || true
-
-final_hints
-echo
-echo "Done. Reopen System Settings > Apple Intelligence & Siri and test Writing Tools, Image Playground, Photos Clean Up."
-if [[ "$DO_ICON_FIX" == "1" ]]; then
-  echo "Because --fix-siri-icon/--all was used, close and reopen System Settings/Launchpad after IconServices refresh."
-fi
+case "$ACTION" in
+  install)
+    run_install
+    ;;
+  status)
+    run_status
+    ;;
+  icon)
+    refresh_siri_icon_identity
+    ;;
+  uninstall)
+    run_uninstall
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac
