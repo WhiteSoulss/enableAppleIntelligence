@@ -242,6 +242,5 @@ Siri 圖標：如果仍是舊圖標，先重啟；必要時執行 --all 或 --fi
 
 ```text
 kanshurichard/enableAppleAI 的 eligibility / countryd 方法
-SkyBlue997/enableMacosAI 的 IORegistry/kext 源頭修正思路
 本 repo 的 macOS 26.5 / 26.5.1 實測補充
 ```
