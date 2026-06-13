@@ -68,11 +68,25 @@ OS_ELIGIBILITY_DOMAINS=(
   OS_ELIGIBILITY_DOMAIN_XCODE_LLM
 )
 
+UI_LINE="----------------------------------------------------------------"
+
 log() { printf '%s\n' "$*"; }
-section() { printf '\n== %s ==\n' "$1"; }
-ok() { printf '[OK] %s\n' "$1"; }
-warn() { printf '[WARN] %s\n' "$1"; }
-die() { printf '[ERROR] %s\n' "$1" >&2; exit 1; }
+hr() { printf '%s\n' "$UI_LINE"; }
+section() { printf '\n%s\n> %s\n' "$UI_LINE" "$1"; }
+ok() { printf '  [OK]   %s\n' "$1"; }
+warn() { printf '  [WARN] %s\n' "$1"; }
+note() { printf '  [..]   %s\n' "$1"; }
+kv() { printf '  %-26s %s\n' "$1:" "$2"; }
+die() { printf '  [FAIL] %s\n' "$1" >&2; exit 1; }
+
+banner() {
+  local mode="$1"
+  printf '\n'
+  hr
+  printf '  enableAppleIntelligence  |  %s\n' "$mode"
+  printf '  Region identity, eligibility, Siri and model asset helpers\n'
+  hr
+}
 
 usage() {
   cat <<'EOF'
@@ -292,6 +306,75 @@ country_origin_is_usa() {
     /usr/bin/grep -qi '555341'
 }
 
+yes_no() {
+  if "$@"; then
+    echo "yes"
+  else
+    echo "no"
+  fi
+}
+
+auth_root_state() {
+  /usr/bin/csrutil authenticated-root status 2>/dev/null |
+    /usr/bin/sed -E 's/^Authenticated Root status:[[:space:]]*//; s/\.$//' |
+    /usr/bin/head -1
+}
+
+eligibility_answer() {
+  local plist="$1"
+  local domain="$2"
+  pb "Print :${domain}:os_eligibility_answer_t" "$plist" 2>/dev/null || echo "missing"
+}
+
+answer_label() {
+  case "$1" in
+    4) echo "4 (eligible)" ;;
+    3) echo "3 (maybe)" ;;
+    2) echo "2 (not eligible)" ;;
+    1) echo "1 (not yet available)" ;;
+    0) echo "0 (invalid)" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+loader_installed() {
+  [[ -f "$LOADER_PLIST" && -x "$LOADER_SCRIPT" ]]
+}
+
+featureflag_installed() {
+  [[ -f "$GM_FEATUREFLAGS_OVERRIDE_PLIST" ]]
+}
+
+apple_internal_live() {
+  apple_internal_enabled "$APPLE_INTERNAL_VARIANT_PLIST"
+}
+
+print_compact_status() {
+  local macos arch sip_state ar_state amfi_state gm_answer loader_state
+  macos="$(/usr/bin/sw_vers -productVersion 2>/dev/null || echo unknown)"
+  arch="$(/usr/bin/uname -m 2>/dev/null || echo unknown)"
+  sip_state="enabled"
+  sip_disabled && sip_state="disabled"
+  ar_state="$(auth_root_state)"
+  [[ -n "$ar_state" ]] || ar_state="unknown"
+  amfi_state="enabled"
+  amfi_disabled && amfi_state="disabled by boot-arg"
+  gm_answer="$(answer_label "$(eligibility_answer "$ELIGIBILITYD_PLIST" OS_ELIGIBILITY_DOMAIN_GREYMATTER)")"
+  loader_state="$(yes_no loader_installed)"
+
+  section "Quick status"
+  kv "macOS" "$macos ($arch)"
+  kv "Console user" "${CONSOLE_USER:-none}"
+  kv "SIP" "$sip_state"
+  kv "Authenticated Root" "$ar_state"
+  kv "AMFI" "$amfi_state"
+  kv "region-info=LL/A" "$(yes_no root_region_is_spoofed)"
+  kv "country-of-origin=USA" "$(yes_no country_origin_is_usa)"
+  kv "kext loaded" "$(yes_no kext_loaded)"
+  kv "boot loader" "$loader_state"
+  kv "GREYMATTER" "$gm_answer"
+}
+
 pb() {
   /usr/libexec/PlistBuddy -c "$1" "$2"
 }
@@ -404,12 +487,16 @@ print_siri_state() {
 }
 
 preflight_install() {
-  section "Preflight"
-  log "Workspace: $ROOT_DIR"
-  log "macOS: $(/usr/bin/sw_vers -productVersion 2>/dev/null || true)"
-  log "Console user: ${CONSOLE_USER:-none}"
+  section "Environment check"
+  kv "Workspace" "$ROOT_DIR"
+  kv "macOS" "$(/usr/bin/sw_vers -productVersion 2>/dev/null || true)"
+  kv "Console user" "${CONSOLE_USER:-none}"
 
-  [[ "$(/usr/bin/uname -m)" == "arm64" ]] || die "This project only supports Apple Silicon."
+  if [[ "$(/usr/bin/uname -m)" == "arm64" ]]; then
+    ok "Apple Silicon detected"
+  else
+    die "This project only supports Apple Silicon."
+  fi
 
   if ! sip_disabled; then
     cat >&2 <<'MSG'
@@ -427,6 +514,8 @@ Then open Startup Security Utility:
 Reboot and run this script again.
 MSG
     exit 1
+  else
+    ok "SIP is disabled; kext can be loaded in Permissive/Reduced Security"
   fi
 
   if amfi_disabled; then
@@ -441,7 +530,7 @@ MSG
     fi
     warn "Reboot after this run so AMFI/PCC state is clean."
   else
-    ok "AMFI boot-arg looks clean"
+    ok "AMFI boot-arg is clean; PCC cloud AI can attest"
   fi
 }
 
@@ -475,6 +564,7 @@ install_kext() {
   /bin/cp -R "$prepared_kext" "$KEXT_DST"
   /usr/sbin/chown -R root:wheel "$KEXT_DST"
   /bin/chmod -R go-w "$KEXT_DST"
+  ok "installed kext bundle to $KEXT_DST"
 
   /usr/bin/codesign -dv --verbose=2 "$KEXT_DST" 2>&1 |
     /usr/bin/grep -E 'Identifier=|Signature=|TeamIdentifier=' || true
@@ -978,14 +1068,47 @@ force_siri_sae() {
     return 0
   fi
 
-  as_console_user /usr/bin/defaults write "$SIRI_DOMAIN" "$SIRI_KEY" -dict \
-    isAvailable -bool true \
-    siriLocale -string "en-US" \
-    desiredOrchestrationMode -int 4 \
-    unavailabilityReasons -int 0 \
-    allCapabilities -dict fullUODCapabilities -int 15 hybridCapabilities -int 9 saeCapabilities -int 7
+  as_console_user /usr/bin/killall cfprefsd 2>/dev/null || true
+  as_console_user /usr/bin/python3 - "$CONSOLE_HOME/Library/Preferences/${SIRI_DOMAIN}.plist" "$SIRI_KEY" <<'PY'
+import os
+import plistlib
+import sys
+
+path, key = sys.argv[1:3]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+
+if os.path.exists(path):
+    try:
+        with open(path, "rb") as f:
+            data = plistlib.load(f)
+    except Exception:
+        data = {}
+else:
+    data = {}
+
+if not isinstance(data, dict):
+    data = {}
+
+data[key] = {
+    "isAvailable": True,
+    "siriLocale": "en-US",
+    "desiredOrchestrationMode": 4,
+    "unavailabilityReasons": 0,
+    "allCapabilities": {
+        "fullUODCapabilities": 15,
+        "hybridCapabilities": 9,
+        "saeCapabilities": 7,
+    },
+}
+
+tmp = f"{path}.codex-tmp"
+with open(tmp, "wb") as f:
+    plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
+os.replace(tmp, path)
+PY
 
   as_console_user /usr/bin/killall cfprefsd SiriNCService Siri SystemUIServer Dock 2>/dev/null || true
+  ok "Siri SAE availability preference written for $CONSOLE_USER"
   as_console_user /usr/bin/defaults read "$SIRI_DOMAIN" "$SIRI_KEY" 2>/dev/null || true
 }
 
@@ -1044,8 +1167,9 @@ PY
   /bin/chmod 0644 "$GEOSERVICES_DIRECT_STORE" 2>/dev/null || true
   /usr/bin/killall locationd geod routined Maps Weather CoreLocationAgent 2>/dev/null || true
 
-  log "GeoServices country: $GEO_IP_CC ($GEO_IP_ADDR, $GEO_IP_CITY, $GEO_IP_REGION, $GEO_IP_LOC)"
-  log "Backup: $backup_dir"
+  ok "GeoServices country set to $GEO_IP_CC"
+  note "IP source: $GEO_IP_ADDR, $GEO_IP_CITY, $GEO_IP_REGION, $GEO_IP_LOC"
+  note "Backup: $backup_dir"
 }
 
 force_countryd_us() {
@@ -1365,10 +1489,10 @@ refresh_ai_daemons() {
 }
 
 run_status() {
-  section "Summary"
-  log "Script: $SELF"
-  log "macOS: $(/usr/bin/sw_vers -productVersion 2>/dev/null || true)"
-  log "Console user: ${CONSOLE_USER:-none}"
+  banner "status"
+  print_compact_status
+  section "Detailed diagnostics"
+  kv "Script" "$SELF"
   print_sip_state
   print_boot_policy
   print_root_identity
@@ -1380,8 +1504,8 @@ run_status() {
 }
 
 run_install() {
+  banner "install"
   preflight_install
-  print_sip_state
 
   [[ "$SKIP_KEXT" == "0" ]] && install_kext
   [[ "$SKIP_LAUNCHDAEMON" == "0" ]] && install_launchdaemon
@@ -1397,9 +1521,11 @@ run_install() {
   restore_siri_menu_bar_extra
   [[ "$DO_ICON_FIX" == "1" ]] && refresh_siri_icon_identity
 
-  run_status
-  section "Done"
+  print_compact_status
+  section "Result"
   cat <<'MSG'
+[OK] Core steps finished.
+
 Reboot after the first successful run, especially if:
   - you just allowed the kext in Privacy & Security
   - AMFI boot-args were removed
@@ -1461,6 +1587,7 @@ remove_apple_internal_variant() {
 }
 
 run_uninstall() {
+  banner "uninstall"
   section "Uninstall / restore"
   backup_for_uninstall
 
@@ -1503,7 +1630,9 @@ case "$ACTION" in
     run_status
     ;;
   icon)
+    banner "Siri icon refresh"
     refresh_siri_icon_identity
+    print_compact_status
     ;;
   uninstall)
     run_uninstall
