@@ -172,6 +172,7 @@ while [[ $# -gt 0 ]]; do
     --fix-siri-icon)
       ACTION="icon"
       DO_ICON_FIX=1
+      FORCE_GEOSERVICES_US=1
       ;;
     --skip-kext)
       SKIP_KEXT=1
@@ -829,6 +830,12 @@ payload = {
         "source": 262,
     }
 }
+with open(path, "wb") as f:
+    plistlib.dump(payload, f)
+PY
+  /usr/sbin/chown _locationd:_locationd "$GEOSERVICES_DIRECT_STORE" 2>/dev/null || true
+  /bin/chmod 0644 "$GEOSERVICES_DIRECT_STORE" 2>/dev/null || true
+}
 
 clean_siri_location_rows_for_icon_fix() {
   [[ "\$SIRI_LOCATION_ICON_MODE" == "1" ]] || return 0
@@ -902,12 +909,7 @@ apply_siri_location_icon_fix() {
   clean_siri_location_rows_for_icon_fix || true
   /usr/bin/killall "System Settings" SecurityPrivacyExtension cfprefsd iconservicesagent IconServicesAgent 2>/dev/null || true
 }
-with open(path, "wb") as f:
-    plistlib.dump(payload, f)
-PY
-  /usr/sbin/chown _locationd:_locationd "$GEOSERVICES_DIRECT_STORE" 2>/dev/null || true
-  /bin/chmod 0644 "$GEOSERVICES_DIRECT_STORE" 2>/dev/null || true
-}
+
 
 {
   echo "==== \$(date) ===="
