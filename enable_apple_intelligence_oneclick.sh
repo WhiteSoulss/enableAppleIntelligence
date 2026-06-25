@@ -29,6 +29,11 @@ LOCAL_KEXT_BIN_B64="$LOCAL_KEXT/Contents/MacOS/CodexRegionSpoof.b64"
 LOADER_SCRIPT="/Library/Scripts/Codex/load-region-spoof.sh"
 LOADER_PLIST="/Library/LaunchDaemons/local.codex.region-spoof-loader.plist"
 SIRI_LOCATION_FIX_DIR="/Library/Scripts/Codex/SiriLocationIconFix"
+LOCAL_ENHANCED_SIRI_REPAIR_HELPER="$ROOT_DIR/tools/repair_enhanced_siri_state.py"
+ENHANCED_SIRI_REPAIR_HELPER="/Library/Scripts/Codex/repair_enhanced_siri_state.py"
+ENHANCED_SIRI_REPAIR_PLIST="/Library/LaunchDaemons/local.codex.enhanced-siri-repair.plist"
+ENHANCED_SIRI_REPAIR_STDOUT="/var/log/codex-enhanced-siri-repair.stdout.log"
+ENHANCED_SIRI_REPAIR_STDERR="/var/log/codex-enhanced-siri-repair.stderr.log"
 
 ELIGIBILITYD_PLIST="/private/var/db/eligibilityd/eligibility.plist"
 OS_ELIGIBILITY_PLIST="/private/var/db/os_eligibility/eligibility.plist"
@@ -51,6 +56,12 @@ FEATUREFLAGS_OVERRIDE_DIR="/Library/Preferences/FeatureFlags/Domain"
 GM_FEATUREFLAGS_OVERRIDE_PLIST="$FEATUREFLAGS_OVERRIDE_DIR/GenerativeModels.plist"
 SYSTEM_GM_FEATUREFLAGS_PLIST="/System/Library/FeatureFlags/Domain/GenerativeModels.plist"
 FEATUREFLAGS_BACKUP_BASE="/private/var/db/codex_featureflags_backup"
+AI_PLATFORM_PREFS_BASE="/private/var/db/AppleIntelligencePlatform"
+CLOUDSUB_CACHE_REL="Library/Preferences/com.apple.CloudSubscriptionFeatures.cache.plist"
+CLOUDSUB_WAITLIST_REL="Library/Preferences/com.apple.CloudSubscriptionFeatures.waitlist.plist"
+GMS_AVAILABILITY_REL="Library/Preferences/com.apple.gms.availability.plist"
+GLOBALPREFERENCES_BYHOST_REL="Library/Preferences/ByHost"
+ENHANCED_SIRI_OVERRIDE_BACKUP_REL="Library/Preferences/EnhancedSiriOverrideBackups"
 
 ELIGIBILITYD_DOMAINS=(
   OS_ELIGIBILITY_DOMAIN_GREYMATTER
@@ -106,7 +117,7 @@ Options:
   --uninstall          Alias for uninstall.
   --dry-run            With uninstall, show actions without changing files.
   --skip-kext          Do not install/load CodexRegionSpoof.kext this run.
-  --skip-launchdaemon  Do not install/update the boot-time loader.
+  --skip-launchdaemon  Do not install/update background LaunchDaemons.
   --skip-eligibility   Do not patch eligibility plist domains.
   --skip-sae           Do not force Siri SAE orchestration preference.
   --skip-location-ip   Do not write GeoServices country cache.
@@ -117,7 +128,8 @@ Options:
   --skip-apple-internal
                        On macOS 27+, skip AppleInternalVariant.plist.
   --skip-macos27-siri-ai
-                       On macOS 27+, skip EnhancedSiriWaitlist override.
+                       On macOS 27+, skip Enhanced Siri waitlist/cache/GMS
+                       overrides.
   --skip-siri-location-icon
                        Do not install/apply the Location Services Siri icon
                        runtime patch.
@@ -252,6 +264,11 @@ console_uid() {
   /usr/bin/id -u "$user" 2>/dev/null || true
 }
 
+console_gid() {
+  local user="$1"
+  /usr/bin/id -g "$user" 2>/dev/null || true
+}
+
 console_home() {
   local user="$1"
   /usr/bin/dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null |
@@ -260,9 +277,11 @@ console_home() {
 
 CONSOLE_USER="$(console_user || true)"
 CONSOLE_UID=""
+CONSOLE_GID=""
 CONSOLE_HOME=""
 if [[ -n "$CONSOLE_USER" ]]; then
   CONSOLE_UID="$(console_uid "$CONSOLE_USER")"
+  CONSOLE_GID="$(console_gid "$CONSOLE_USER")"
   CONSOLE_HOME="$(console_home "$CONSOLE_USER")"
 fi
 [[ -n "$CONSOLE_HOME" ]] || CONSOLE_HOME="/var/root"
@@ -487,6 +506,103 @@ print_siri_state() {
   fi
 }
 
+print_enhanced_siri_state() {
+  section "Enhanced Siri cloud state"
+  if [[ -z "$CONSOLE_USER" || -z "$CONSOLE_UID" ]]; then
+    warn "No console user found; skipping Enhanced Siri cloud diagnostics"
+    return 0
+  fi
+
+  local cache_plist="$CONSOLE_HOME/$CLOUDSUB_CACHE_REL"
+  local waitlist_plist="$CONSOLE_HOME/$CLOUDSUB_WAITLIST_REL"
+  local user_gms_plist="$CONSOLE_HOME/$GMS_AVAILABILITY_REL"
+  local platform_gms_plist="$AI_PLATFORM_PREFS_BASE/$CONSOLE_UID/Library/Preferences/com.apple.gms.availability.plist"
+  local byhost_dir="$CONSOLE_HOME/$GLOBALPREFERENCES_BYHOST_REL"
+
+  /usr/bin/python3 - "$cache_plist" "$waitlist_plist" "$user_gms_plist" "$platform_gms_plist" "$GM_FEATUREFLAGS_OVERRIDE_PLIST" "$byhost_dir" <<'PY'
+import json
+import pathlib
+import plistlib
+import sys
+
+cache_path, waitlist_path, user_gms_path, platform_gms_path, featureflags_path, byhost_dir = sys.argv[1:7]
+
+def load_plist(path):
+    p = pathlib.Path(path)
+    if not p.exists():
+        return None
+    with p.open("rb") as fh:
+        return plistlib.load(fh)
+
+def decode_blob(raw):
+    if isinstance(raw, (bytes, bytearray)):
+        for parser in (plistlib.loads, lambda b: json.loads(b.decode("utf-8"))):
+            try:
+                return parser(raw)
+            except Exception:
+                pass
+    return raw
+
+cache = load_plist(cache_path) or {}
+waitlist = load_plist(waitlist_path) or {}
+user_gms = load_plist(user_gms_path) or {}
+platform_gms = load_plist(platform_gms_path) or {}
+featureflags = load_plist(featureflags_path) or {}
+if not isinstance(cache, dict):
+    cache = {}
+if not isinstance(waitlist, dict):
+    waitlist = {}
+if not isinstance(user_gms, dict):
+    user_gms = {}
+if not isinstance(platform_gms, dict):
+    platform_gms = {}
+if not isinstance(featureflags, dict):
+    featureflags = {}
+
+cache_entry = decode_blob(cache.get("ai.enhanced-siri")) if isinstance(cache, dict) else None
+cache_value = cache_entry.get("value", {}) if isinstance(cache_entry, dict) else {}
+print(f"cache ai.enhanced-siri canUse: {cache_value.get('canUse')!r}")
+print(f"cache fetched: {cache_entry.get('fetched')!r}" if isinstance(cache_entry, dict) else "cache fetched: None")
+
+waitlist_results = decode_blob(waitlist.get("waitlistResults", b"[]")) if isinstance(waitlist, dict) else []
+status = None
+if isinstance(waitlist_results, list):
+    for item in waitlist_results:
+        value = item.get("value", {}) if isinstance(item, dict) else {}
+        if "ai.enhanced-siri" in (value.get("featureIDs") or []):
+            status = value.get("status")
+            break
+print(f"waitlist status: {status!r}")
+
+print(f"user unifiedReasons: {decode_blob(user_gms.get('com.apple.gms.enhancedSiri.unifiedReasons'))!r}")
+print(f"platform denied use cases: {platform_gms.get('com.apple.gms.availability.accessNotGrantedUseCases')!r}")
+print(f"platform unifiedReasons: {decode_blob(platform_gms.get('com.apple.gms.availability.unifiedReasons'))!r}")
+
+byhost_states = []
+for plist_path in sorted(pathlib.Path(byhost_dir).glob(".GlobalPreferences.*.plist")):
+    data = load_plist(plist_path) or {}
+    byhost_states.append(
+        (
+            plist_path.name,
+            data.get("com.apple.gms.enhancedSiri.availability"),
+            data.get("com.apple.gms.enhancedSiri.reasons"),
+        )
+    )
+if byhost_states:
+    for name, availability, reasons in byhost_states:
+        print(f"{name}: availability={availability!r} reasons={reasons!r}")
+else:
+    print("ByHost GlobalPreferences: none found")
+
+print(
+    "FeatureFlags EnhancedSiriWaitlist: "
+    f"{featureflags.get('EnhancedSiriWaitlist', {}).get('Enabled')!r}"
+)
+PY
+  kv "repair helper installed" "$(yes_no test -x "$ENHANCED_SIRI_REPAIR_HELPER")"
+  kv "repair daemon installed" "$(yes_no test -f "$ENHANCED_SIRI_REPAIR_PLIST")"
+}
+
 preflight_install() {
   section "Environment check"
   kv "Workspace" "$ROOT_DIR"
@@ -681,6 +797,13 @@ PY
   /bin/chmod 644 "$SIRI_LOCATION_FIX_DIR/patch_locationd_skip_assistantd_association_lldb.py"
 }
 
+install_enhanced_siri_repair_helper() {
+  [[ -f "$LOCAL_ENHANCED_SIRI_REPAIR_HELPER" ]] || die "Missing helper: $LOCAL_ENHANCED_SIRI_REPAIR_HELPER"
+  /bin/mkdir -p "$(dirname "$ENHANCED_SIRI_REPAIR_HELPER")"
+  /usr/bin/install -m 755 "$LOCAL_ENHANCED_SIRI_REPAIR_HELPER" "$ENHANCED_SIRI_REPAIR_HELPER"
+  /usr/sbin/chown root:wheel "$ENHANCED_SIRI_REPAIR_HELPER"
+}
+
 clean_siri_location_rows() {
   local clients_plist="/var/db/locationd/clients.plist"
   /usr/bin/python3 - "$clients_plist" <<'PY'
@@ -738,6 +861,37 @@ for key in remove_keys:
 PY
 }
 
+console_launchagent_label() {
+  case "$1" in
+    assistantd) echo "com.apple.assistantd" ;;
+    generativeexperiencesd) echo "com.apple.generativeexperiencesd" ;;
+    *) return 1 ;;
+  esac
+}
+
+console_launchagent_plist() {
+  case "$1" in
+    assistantd) echo "/System/Library/LaunchAgents/com.apple.assistantd.plist" ;;
+    generativeexperiencesd) echo "/System/Library/LaunchAgents/com.apple.generativeexperiencesd.plist" ;;
+    *) return 1 ;;
+  esac
+}
+
+kickstart_console_launchagent() {
+  local service="$1" label plist
+  [[ -n "$CONSOLE_UID" ]] || return 0
+  label="$(console_launchagent_label "$service")" || return 0
+  plist="$(console_launchagent_plist "$service")" || return 0
+  /bin/launchctl bootstrap "gui/$CONSOLE_UID" "$plist" 2>/dev/null || true
+  /bin/launchctl kickstart -k "gui/$CONSOLE_UID/$label" 2>/dev/null || true
+}
+
+restart_console_ai_agents() {
+  [[ -n "$CONSOLE_UID" ]] || return 0
+  kickstart_console_launchagent generativeexperiencesd
+  kickstart_console_launchagent assistantd
+}
+
 apply_siri_location_icon_runtime_fix_now() {
   section "Location Services Siri icon runtime patch"
   local patch="$SIRI_LOCATION_FIX_DIR/patch_locationd_skip_assistantd_association_lldb.py"
@@ -760,10 +914,7 @@ apply_siri_location_icon_runtime_fix_now() {
     warn "locationd did not restart before patch attempt"
   fi
 
-  if [[ -n "$CONSOLE_UID" ]]; then
-    /bin/launchctl bootstrap "gui/$CONSOLE_UID" /System/Library/LaunchAgents/com.apple.assistantd.plist 2>/dev/null || true
-    /bin/launchctl kickstart -k "gui/$CONSOLE_UID/com.apple.assistantd" 2>/dev/null || true
-  fi
+  restart_console_ai_agents
   clean_siri_location_rows || true
   as_console_user /usr/bin/killall "System Settings" SecurityPrivacyExtension cfprefsd iconservicesagent IconServicesAgent 2>/dev/null || true
 }
@@ -934,7 +1085,7 @@ apply_siri_location_icon_fix() {
   apply_siri_location_icon_fix
 
   echo "refreshing region and AI daemons"
-  /usr/bin/killall eligibilityd generativeexperiencesd modelcatalogd modelmanagerd countryd locationd geod routined 2>/dev/null || true
+  /usr/bin/killall eligibilityd generativeexperiencesd modelcatalogd modelmanagerd assistantd countryd locationd geod routined 2>/dev/null || true
   /bin/launchctl kickstart -k system/com.apple.eligibilityd 2>/dev/null || true
   /bin/launchctl kickstart -k system/com.apple.modelcatalogd 2>/dev/null || true
   /bin/launchctl kickstart -k system/com.apple.modelmanagerd 2>/dev/null || true
@@ -980,6 +1131,72 @@ EOF
 
   ok "installed and started $LOADER_PLIST"
   log "Log: /var/log/codex-region-spoof-loader.log"
+}
+
+install_macos27_enhanced_siri_repair_launchdaemon() {
+  section "Install macOS 27 Enhanced Siri repair daemon"
+  local major
+  major="$(macos_major_version)"
+  if (( major < 27 )); then
+    log "macOS major version is $major; skipping Enhanced Siri repair daemon."
+    return 0
+  fi
+  if [[ -z "$CONSOLE_USER" || -z "$CONSOLE_UID" ]]; then
+    warn "No console user found; skipping Enhanced Siri repair daemon"
+    return 0
+  fi
+
+  install_enhanced_siri_repair_helper
+
+  local cache_plist="$CONSOLE_HOME/$CLOUDSUB_CACHE_REL"
+  local waitlist_plist="$CONSOLE_HOME/$CLOUDSUB_WAITLIST_REL"
+  local user_gms_plist="$CONSOLE_HOME/$GMS_AVAILABILITY_REL"
+  local platform_gms_plist="$AI_PLATFORM_PREFS_BASE/$CONSOLE_UID/Library/Preferences/com.apple.gms.availability.plist"
+
+  /bin/cat > "$ENHANCED_SIRI_REPAIR_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.codex.enhanced-siri-repair</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>$ENHANCED_SIRI_REPAIR_HELPER</string>
+    <string>--repair-if-needed</string>
+    <string>--quiet</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>120</integer>
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+  <key>WatchPaths</key>
+  <array>
+    <string>$cache_plist</string>
+    <string>$waitlist_plist</string>
+    <string>$user_gms_plist</string>
+    <string>$platform_gms_plist</string>
+  </array>
+  <key>StandardOutPath</key>
+  <string>$ENHANCED_SIRI_REPAIR_STDOUT</string>
+  <key>StandardErrorPath</key>
+  <string>$ENHANCED_SIRI_REPAIR_STDERR</string>
+</dict>
+</plist>
+EOF
+
+  /usr/sbin/chown root:wheel "$ENHANCED_SIRI_REPAIR_PLIST"
+  /bin/chmod 644 "$ENHANCED_SIRI_REPAIR_PLIST"
+
+  /bin/launchctl bootout system "$ENHANCED_SIRI_REPAIR_PLIST" 2>/dev/null || true
+  /bin/launchctl bootstrap system "$ENHANCED_SIRI_REPAIR_PLIST" 2>/dev/null || true
+  /bin/launchctl kickstart -k system/local.codex.enhanced-siri-repair 2>/dev/null || true
+
+  ok "installed and started $ENHANCED_SIRI_REPAIR_PLIST"
+  log "Logs: $ENHANCED_SIRI_REPAIR_STDOUT, $ENHANCED_SIRI_REPAIR_STDERR"
 }
 
 ensure_domain() {
@@ -1338,6 +1555,25 @@ PY
   ok "FeatureFlags override installed; backup: $backup_dir"
 }
 
+install_macos27_enhanced_siri_overrides() {
+  section "macOS 27 Enhanced Siri cloud + GMS overrides"
+  local major backup_dir
+  major="$(macos_major_version)"
+  if (( major < 27 )); then
+    log "macOS major version is $major; skipping macOS 27-only Enhanced Siri state repair."
+    return 0
+  fi
+  if [[ -z "$CONSOLE_USER" || -z "$CONSOLE_UID" || -z "$CONSOLE_GID" ]]; then
+    warn "No console user found; skipping user-scoped Enhanced Siri state repair"
+    return 0
+  fi
+
+  install_enhanced_siri_repair_helper
+  backup_dir="$CONSOLE_HOME/$ENHANCED_SIRI_OVERRIDE_BACKUP_REL/$(/bin/date +%Y%m%d-%H%M%S)"
+  /usr/bin/python3 "$ENHANCED_SIRI_REPAIR_HELPER" --repair-now --backup-root "$backup_dir"
+  ok "Enhanced Siri waitlist/cache and GMS overrides applied; backup: $backup_dir"
+}
+
 mirror_siri_availability_to_appleidsettings() {
   [[ -n "$CONSOLE_USER" ]] || return 0
   section "Mirror SiriAvailability to AppleIDSettings"
@@ -1483,11 +1719,16 @@ SWIFT
 
 refresh_ai_daemons() {
   section "Refresh AI daemons"
-  /usr/bin/killall eligibilityd generativeexperiencesd modelcatalogd modelmanagerd 2>/dev/null || true
+  /usr/bin/killall eligibilityd generativeexperiencesd modelcatalogd modelmanagerd assistantd 2>/dev/null || true
   /bin/launchctl kickstart -k system/com.apple.eligibilityd 2>/dev/null || true
   /bin/launchctl kickstart -k system/com.apple.modelcatalogd 2>/dev/null || true
   /bin/launchctl kickstart -k system/com.apple.modelmanagerd 2>/dev/null || true
-  [[ -n "$CONSOLE_USER" ]] && as_console_user /usr/bin/killall "System Settings" SiriPreferenceExtension SiriNCService Siri cfprefsd 2>/dev/null || true
+  if [[ -n "$CONSOLE_USER" ]]; then
+    as_console_user /usr/bin/notifyutil -p com.apple.CloudSubscriptionFeature.Changed 2>/dev/null || true
+    as_console_user /usr/bin/notifyutil -p com.apple.siri.orchestration.capabilities.didChange 2>/dev/null || true
+    as_console_user /usr/bin/killall "System Settings" SiriPreferenceExtension SiriNCService Siri cfprefsd 2>/dev/null || true
+  fi
+  restart_console_ai_agents
 }
 
 run_status() {
@@ -1503,6 +1744,7 @@ run_status() {
   print_country_state
   print_macos27_state
   print_siri_state
+  print_enhanced_siri_state
 }
 
 run_install() {
@@ -1517,6 +1759,8 @@ run_install() {
   [[ "$SKIP_COUNTRYD" == "0" ]] && force_countryd_us
   [[ "$SKIP_APPLE_INTERNAL" == "0" ]] && install_apple_internal_variant
   [[ "$SKIP_MACOS27_SIRI_AI" == "0" ]] && install_macos27_featureflag
+  [[ "$SKIP_MACOS27_SIRI_AI" == "0" ]] && install_macos27_enhanced_siri_overrides
+  [[ "$SKIP_MACOS27_SIRI_AI" == "0" && "$SKIP_LAUNCHDAEMON" == "0" ]] && install_macos27_enhanced_siri_repair_launchdaemon
   [[ "$SKIP_WEB_SEARCH" == "0" ]] && force_web_search_provider_google
   [[ "$SKIP_SIRI_LOCATION_ICON" == "0" ]] && apply_siri_location_icon_runtime_fix_now
   refresh_ai_daemons
@@ -1549,11 +1793,29 @@ backup_for_uninstall() {
     return 0
   fi
   /bin/mkdir -p "$BACKUP_ROOT"
-  for p in "$KEXT_DST" "$LOADER_SCRIPT" "$LOADER_PLIST" "$SIRI_LOCATION_FIX_DIR" "$ELIGIBILITYD_PLIST" "$OS_ELIGIBILITY_PLIST" "$COUNTRYD_PLIST" "$GEOSERVICES_DIRECT_STORE" "$GM_FEATUREFLAGS_OVERRIDE_PLIST"; do
+  for p in "$KEXT_DST" "$LOADER_SCRIPT" "$LOADER_PLIST" "$ENHANCED_SIRI_REPAIR_HELPER" "$ENHANCED_SIRI_REPAIR_PLIST" "$SIRI_LOCATION_FIX_DIR" "$ELIGIBILITYD_PLIST" "$OS_ELIGIBILITY_PLIST" "$COUNTRYD_PLIST" "$GEOSERVICES_DIRECT_STORE" "$GM_FEATUREFLAGS_OVERRIDE_PLIST"; do
     [[ -e "$p" ]] || continue
     /bin/mkdir -p "$BACKUP_ROOT$(dirname "$p")"
     /bin/cp -a "$p" "$BACKUP_ROOT$p" 2>/dev/null || true
   done
+  for p in \
+    "$CONSOLE_HOME/$CLOUDSUB_CACHE_REL" \
+    "$CONSOLE_HOME/$CLOUDSUB_WAITLIST_REL" \
+    "$CONSOLE_HOME/$GMS_AVAILABILITY_REL" \
+    "$AI_PLATFORM_PREFS_BASE/${CONSOLE_UID:-0}/Library/Preferences/com.apple.gms.availability.plist"
+  do
+    [[ -e "$p" ]] || continue
+    /bin/mkdir -p "$BACKUP_ROOT$(dirname "$p")"
+    /bin/cp -a "$p" "$BACKUP_ROOT$p" 2>/dev/null || true
+  done
+  if [[ -d "$CONSOLE_HOME/$GLOBALPREFERENCES_BYHOST_REL" ]]; then
+    local byhost_plist
+    for byhost_plist in "$CONSOLE_HOME/$GLOBALPREFERENCES_BYHOST_REL"/.GlobalPreferences.*.plist; do
+      [[ -e "$byhost_plist" ]] || continue
+      /bin/mkdir -p "$BACKUP_ROOT$(dirname "$byhost_plist")"
+      /bin/cp -a "$byhost_plist" "$BACKUP_ROOT$byhost_plist" 2>/dev/null || true
+    done
+  fi
   run_status > "$BACKUP_ROOT/status-before.txt" 2>&1 || true
   log "Backup: $BACKUP_ROOT"
 }
@@ -1594,7 +1856,8 @@ run_uninstall() {
   backup_for_uninstall
 
   do_or_print /bin/launchctl bootout system "$LOADER_PLIST" 2>/dev/null || true
-  do_or_print /bin/rm -f "$LOADER_PLIST" "$LOADER_SCRIPT"
+  do_or_print /bin/launchctl bootout system "$ENHANCED_SIRI_REPAIR_PLIST" 2>/dev/null || true
+  do_or_print /bin/rm -f "$LOADER_PLIST" "$LOADER_SCRIPT" "$ENHANCED_SIRI_REPAIR_PLIST" "$ENHANCED_SIRI_REPAIR_HELPER"
   do_or_print /bin/rm -rf "$SIRI_LOCATION_FIX_DIR"
 
   if [[ -d "$KEXT_DST" ]]; then
@@ -1617,7 +1880,7 @@ run_uninstall() {
     do_or_print as_console_user /usr/bin/defaults delete "$SIRI_DOMAIN" "$SIRI_KEY" 2>/dev/null || true
   fi
 
-  do_or_print /usr/bin/killall eligibilityd generativeexperiencesd modelcatalogd modelmanagerd countryd locationd 2>/dev/null || true
+  do_or_print /usr/bin/killall eligibilityd generativeexperiencesd modelcatalogd modelmanagerd assistantd countryd locationd 2>/dev/null || true
   run_status
 
   section "Next steps"
