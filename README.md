@@ -94,6 +94,8 @@ System Settings -> Privacy & Security -> 滑到底部 -> Allow
 把 countryd cache 固定為 US
 macOS 27+ 寫入 AppleInternalVariant.plist
 macOS 27+ 寫入 EnhancedSiriWaitlist FeatureFlags override
+macOS 27+ 修正 Enhanced Siri waitlist / CloudSubscriptionFeatures / GMS availability 狀態
+macOS 27+ 安裝常駐 Enhanced Siri repair LaunchDaemon，開機後與 cloud cache 被覆寫時自動補回
 保留 Siri Launchpad 圖標刷新
 保留 Location Services 裡 Siri 圖標 runtime patch
 保留 Siri / Safari 搜索 provider 切到 Google 並清理舊 Baidu 搜索
@@ -127,6 +129,8 @@ macOS 27+ 寫入 EnhancedSiriWaitlist FeatureFlags override
 --skip-web-search
 ```
 
+`--skip-launchdaemon` 會同時跳過開機載入 kext 的 loader 與 macOS 27+ Enhanced Siri repair daemon。
+
 ## 驗證
 
 ```bash
@@ -141,14 +145,25 @@ country-of-origin = USA
 CodexRegionSpoof loaded
 GREYMATTER / FOUNDATION_MODELS / PERSONAL_QA = 4
 SiriAvailability.desiredOrchestrationMode = 4
+ai.enhanced-siri canUse = true
+Enhanced Siri waitlist status = active
+Enhanced Siri unifiedReasons = []
 ```
 
 也可以看：
 
 ```bash
 sudo tail -100 /var/log/codex-region-spoof-loader.log
+sudo tail -100 /var/log/codex-enhanced-siri-repair.stdout.log
 ioreg -rd1 -c IOPlatformExpertDevice | grep -Ei 'region-info|country-of-origin'
 sudo kmutil showloaded | grep -Ei 'Codex|RegionSpoof'
+```
+
+如果重啟或聯網後又看到 `Siri Update in Progress` / 舊 Siri UI，可先看：
+
+```bash
+sudo tail -200 /var/log/codex-enhanced-siri-repair.stdout.log
+sudo tail -200 /var/log/codex-enhanced-siri-repair.stderr.log
 ```
 
 ## 成功後測試
