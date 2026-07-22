@@ -1299,9 +1299,19 @@ patch_eligibility_domains() {
 }
 
 force_siri_sae() {
-  section "Force Siri SAE orchestration"
+  section "Refresh Siri orchestration"
   if [[ -z "$CONSOLE_USER" ]]; then
     warn "No console user found; skipping user SiriAvailability"
+    return 0
+  fi
+
+  local major
+  major="$(macos_major_version)"
+  if (( major >= 27 )); then
+    # macOS 27 owns this state and its numeric modes changed after early betas.
+    # A static value can downgrade a newer Linwood route to the legacy shell.
+    note "macOS 27 calculates Siri orchestration dynamically; preserving its current value."
+    as_console_user /usr/bin/defaults read "$SIRI_DOMAIN" "$SIRI_KEY" 2>/dev/null || true
     return 0
   fi
 
