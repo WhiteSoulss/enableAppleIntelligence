@@ -322,8 +322,10 @@ root_region_is_spoofed() {
 }
 
 country_origin_is_usa() {
+  # ioreg renders country-of-origin either as hex (555341) or as the ASCII
+  # string <"USA"> depending on padding; match both to avoid a false negative.
   /usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null |
-    /usr/bin/grep -qi '555341'
+    /usr/bin/grep -qi '555341\|"USA"'
 }
 
 yes_no() {
