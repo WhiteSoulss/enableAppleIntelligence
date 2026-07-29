@@ -31,15 +31,6 @@ NOTIFY_NAMES = (
     "com.apple.CloudSubscriptionFeature.Changed",
     "com.apple.siri.orchestration.capabilities.didChange",
 )
-GUI_LAUNCH_AGENTS = (
-    ("com.apple.generativeexperiencesd", "/System/Library/LaunchAgents/com.apple.generativeexperiencesd.plist"),
-    ("com.apple.assistantd", "/System/Library/LaunchAgents/com.apple.assistantd.plist"),
-)
-KILL_NAMES = (
-    "assistantd",
-    "generativeexperiencesd",
-    "cfprefsd",
-)
 
 
 @dataclass(frozen=True)
@@ -125,6 +116,15 @@ def decode_blob(raw):
             except Exception:
                 pass
     return raw
+
+
+def contains_asset_not_ready(value) -> bool:
+    """Return true when the system is waiting for a signed Siri asset."""
+    if isinstance(value, dict):
+        return "assetIsNotReady" in value or any(contains_asset_not_ready(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(contains_asset_not_ready(item) for item in value)
+    return value == "assetIsNotReady"
 
 
 def encode_plist_blob(value) -> bytes:
@@ -238,23 +238,29 @@ def state_snapshot(ctx: ConsoleContext) -> dict:
     user_unified = decode_blob(user_gms.get("com.apple.gms.enhancedSiri.unifiedReasons")) if isinstance(user_gms, dict) else None
     platform_denied = platform_gms.get("com.apple.gms.availability.accessNotGrantedUseCases") if isinstance(platform_gms, dict) else None
     platform_unified = decode_blob(platform_gms.get("com.apple.gms.availability.unifiedReasons")) if isinstance(platform_gms, dict) else None
+    asset_not_ready = contains_asset_not_ready(user_unified)
 
     problems = []
+    blockers = []
     if cache_value.get("canUse") is not True:
         problems.append("cloud cache denies ai.enhanced-siri")
     if waitlist_status != "active":
         problems.append(f"waitlist status is {waitlist_status!r}")
     if user_unified not in (None, []):
-        problems.append(f"user unifiedReasons is {user_unified!r}")
+        if asset_not_ready:
+            blockers.append("Siri reports assetIsNotReady; waiting for Apple-signed Linwood assets")
+        else:
+            problems.append(f"user unifiedReasons is {user_unified!r}")
     if platform_denied not in (None, []):
         problems.append(f"platform denied use cases is {platform_denied!r}")
     if platform_unified not in (None, {}):
         problems.append(f"platform unifiedReasons is {platform_unified!r}")
     for entry in byhost_states:
-        if entry["availability"] is not True:
-            problems.append(f"{entry['path'].name} availability is {entry['availability']!r}")
-        if entry["reasons"] not in (None, []):
-            problems.append(f"{entry['path'].name} reasons is {entry['reasons']!r}")
+        if not asset_not_ready:
+            if entry["availability"] is not True:
+                problems.append(f"{entry['path'].name} availability is {entry['availability']!r}")
+            if entry["reasons"] not in (None, []):
+                problems.append(f"{entry['path'].name} reasons is {entry['reasons']!r}")
         if entry["denied_use_cases"] not in (None, []):
             problems.append(f"{entry['path'].name} denied use cases is {entry['denied_use_cases']!r}")
         if entry["unified_reasons"] not in (None, {}):
@@ -273,6 +279,8 @@ def state_snapshot(ctx: ConsoleContext) -> dict:
         "platform_denied": platform_denied,
         "platform_unified": platform_unified,
         "byhost_states": byhost_states,
+        "asset_not_ready": asset_not_ready,
+        "blockers": blockers,
         "problems": problems,
     }
 
@@ -292,7 +300,11 @@ def print_snapshot(ctx: ConsoleContext, snapshot: dict) -> None:
             )
     else:
         print("ByHost GlobalPreferences: none found")
-    if snapshot["problems"]:
+    if snapshot["blockers"]:
+        print("state: waiting for required Siri asset")
+        for blocker in snapshot["blockers"]:
+            print(f"- {blocker}")
+    elif snapshot["problems"]:
         print("state: degraded")
         for problem in snapshot["problems"]:
             print(f"- {problem}")
@@ -304,14 +316,12 @@ def run(cmd: list[str]) -> None:
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
 
-def restart_runtime(ctx: ConsoleContext) -> None:
-    for name in KILL_NAMES:
-        run(["/usr/bin/killall", name])
+def notify_runtime(ctx: ConsoleContext) -> None:
+    """Tell the GUI session to refresh availability without tearing down live XPC."""
+
+    # assistantd owns Campo request connections. Restarting it aborts active replies.
     for notification in NOTIFY_NAMES:
         run(["/bin/launchctl", "asuser", str(ctx.uid), "/usr/bin/notifyutil", "-p", notification])
-    for label, plist in GUI_LAUNCH_AGENTS:
-        run(["/bin/launchctl", "bootstrap", f"gui/{ctx.uid}", plist])
-        run(["/bin/launchctl", "kickstart", "-k", f"gui/{ctx.uid}/{label}"])
 
 
 def apply_repair(ctx: ConsoleContext, snapshot: dict, backup_root: pathlib.Path, dry_run: bool) -> dict:
@@ -380,43 +390,45 @@ def apply_repair(ctx: ConsoleContext, snapshot: dict, backup_root: pathlib.Path,
     matched_item["fetched"] = cf_now
     waitlist["waitlistResults"] = encode_json_blob(waitlist_results)
 
-    user_gms["com.apple.gms.availability.reasons"] = []
-    user_gms["com.apple.gms.availability.wasAvailable"] = True
-    user_gms["com.apple.gms.availability.lastCheckedReadiness"] = now
-    user_gms["com.apple.gms.availability.lastReadinessChange"] = now
-    user_gms["com.apple.gms.availability.lastUpdateStarted"] = now
-    user_gms["com.apple.gms.availability.lastUpdateEnded"] = now
-    user_gms["com.apple.gms.availability.lastUpdateChanged"] = True
-    latest_notifications = decode_blob(user_gms.get("com.apple.gms.availability.latestNotifications"))
-    if isinstance(latest_notifications, dict):
-        latest_notifications[".force"] = now
-        latest_notifications[".notification(com.apple.siri.orchestration.capabilities.didChange, type: .normal)"] = now
-        user_gms["com.apple.gms.availability.latestNotifications"] = encode_plist_blob(latest_notifications)
-    if boot_uuid:
-        user_gms["com.apple.gms.availability.updatedSinceBootUUID"] = boot_uuid
-        user_gms["com.apple.gms.enhancedSiri.bootUUID"] = boot_uuid
-    user_gms["com.apple.gms.availability.accessNotGrantedUseCases"] = []
-    user_gms["com.apple.gms.enhancedSiri.unifiedReasons"] = b"[]"
-    user_gms["com.apple.gms.enhancedSiri.wasEverAvailable"] = True
-
-    platform_gms["com.apple.gms.availability.accessNotGrantedUseCases"] = []
-    platform_gms["com.apple.gms.availability.reasons"] = []
-    platform_gms["com.apple.gms.availability.unifiedReasons"] = b"{}"
-
+    preserve_runtime_state = snapshot["asset_not_ready"]
     patched_byhost = 0
     byhost_payloads: list[tuple[pathlib.Path, dict]] = []
-    for entry in snapshot["byhost_states"]:
-        path = entry["path"]
-        byhost = load_plist(path)
-        if not isinstance(byhost, dict):
-            byhost = {}
-        byhost["com.apple.gms.availability.accessNotGrantedUseCases"] = []
-        byhost["com.apple.gms.availability.unifiedReasons"] = b"{}"
-        byhost["com.apple.gms.enhancedSiri.availability"] = True
-        byhost["com.apple.gms.enhancedSiri.reasons"] = []
-        byhost["com.apple.gms.enhancedSiri.lastUpdated"] = now
-        byhost_payloads.append((path, byhost))
-        patched_byhost += 1
+    if not preserve_runtime_state:
+        user_gms["com.apple.gms.availability.reasons"] = []
+        user_gms["com.apple.gms.availability.wasAvailable"] = True
+        user_gms["com.apple.gms.availability.lastCheckedReadiness"] = now
+        user_gms["com.apple.gms.availability.lastReadinessChange"] = now
+        user_gms["com.apple.gms.availability.lastUpdateStarted"] = now
+        user_gms["com.apple.gms.availability.lastUpdateEnded"] = now
+        user_gms["com.apple.gms.availability.lastUpdateChanged"] = True
+        latest_notifications = decode_blob(user_gms.get("com.apple.gms.availability.latestNotifications"))
+        if isinstance(latest_notifications, dict):
+            latest_notifications[".force"] = now
+            latest_notifications[".notification(com.apple.siri.orchestration.capabilities.didChange, type: .normal)"] = now
+            user_gms["com.apple.gms.availability.latestNotifications"] = encode_plist_blob(latest_notifications)
+        if boot_uuid:
+            user_gms["com.apple.gms.availability.updatedSinceBootUUID"] = boot_uuid
+            user_gms["com.apple.gms.enhancedSiri.bootUUID"] = boot_uuid
+        user_gms["com.apple.gms.availability.accessNotGrantedUseCases"] = []
+        user_gms["com.apple.gms.enhancedSiri.unifiedReasons"] = b"[]"
+        user_gms["com.apple.gms.enhancedSiri.wasEverAvailable"] = True
+
+        platform_gms["com.apple.gms.availability.accessNotGrantedUseCases"] = []
+        platform_gms["com.apple.gms.availability.reasons"] = []
+        platform_gms["com.apple.gms.availability.unifiedReasons"] = b"{}"
+
+        for entry in snapshot["byhost_states"]:
+            path = entry["path"]
+            byhost = load_plist(path)
+            if not isinstance(byhost, dict):
+                byhost = {}
+            byhost["com.apple.gms.availability.accessNotGrantedUseCases"] = []
+            byhost["com.apple.gms.availability.unifiedReasons"] = b"{}"
+            byhost["com.apple.gms.enhancedSiri.availability"] = True
+            byhost["com.apple.gms.enhancedSiri.reasons"] = []
+            byhost["com.apple.gms.enhancedSiri.lastUpdated"] = now
+            byhost_payloads.append((path, byhost))
+            patched_byhost += 1
 
     if dry_run:
         return {
@@ -424,27 +436,33 @@ def apply_repair(ctx: ConsoleContext, snapshot: dict, backup_root: pathlib.Path,
             "patched_byhost": patched_byhost,
             "session_id": session_id,
             "alt_dsid": alt_dsid,
+            "runtime_state_preserved": preserve_runtime_state,
         }
 
     backup_root.mkdir(parents=True, exist_ok=True)
-    for path in (ctx.cache_path, ctx.waitlist_path, ctx.user_gms_path, ctx.platform_gms_path):
+    backup_paths = [ctx.cache_path, ctx.waitlist_path]
+    if not preserve_runtime_state:
+        backup_paths.extend((ctx.user_gms_path, ctx.platform_gms_path))
+    for path in backup_paths:
         backup_file(path, backup_root)
     for path, _payload in byhost_payloads:
         backup_file(path, backup_root)
 
     write_plist(ctx.cache_path, cache, owner=(ctx.uid, ctx.gid))
     write_plist(ctx.waitlist_path, waitlist, owner=(ctx.uid, ctx.gid))
-    write_plist(ctx.user_gms_path, user_gms, owner=(ctx.uid, ctx.gid))
-    write_plist(ctx.platform_gms_path, platform_gms)
-    for path, payload in byhost_payloads:
-        write_plist(path, payload, owner=(ctx.uid, ctx.gid))
+    if not preserve_runtime_state:
+        write_plist(ctx.user_gms_path, user_gms, owner=(ctx.uid, ctx.gid))
+        write_plist(ctx.platform_gms_path, platform_gms)
+        for path, payload in byhost_payloads:
+            write_plist(path, payload, owner=(ctx.uid, ctx.gid))
 
-    restart_runtime(ctx)
+    notify_runtime(ctx)
     return {
         "backup_root": backup_root,
         "patched_byhost": patched_byhost,
         "session_id": session_id,
         "alt_dsid": alt_dsid,
+        "runtime_state_preserved": preserve_runtime_state,
     }
 
 
@@ -473,7 +491,7 @@ def main() -> int:
         snapshot = state_snapshot(ctx)
         if args.status:
             print_snapshot(ctx, snapshot)
-            return 0 if not snapshot["problems"] else 1
+            return 0 if not (snapshot["problems"] or snapshot["blockers"]) else 1
 
         try:
             ensure_root_for_write(args.dry_run)
@@ -501,6 +519,7 @@ def main() -> int:
         print(f"repairApplied: True")
         print(f"backup root: {result['backup_root']}")
         print(f"patchedByHost: {result['patched_byhost']}")
+        print(f"runtimeStatePreserved: {result['runtime_state_preserved']}")
         print(f"sessionID: {result['session_id']!r}")
         print(f"altDSID: {result['alt_dsid']!r}")
         print_snapshot(ctx, repaired)

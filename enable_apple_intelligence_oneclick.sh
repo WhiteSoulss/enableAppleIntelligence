@@ -369,8 +369,22 @@ apple_internal_live() {
   apple_internal_enabled "$APPLE_INTERNAL_VARIANT_PLIST"
 }
 
+gui_eligibility_agent_state() {
+  if [[ -z "${CONSOLE_UID:-}" ]]; then
+    echo "n/a"
+    return 0
+  fi
+
+  if /bin/launchctl print-disabled "gui/$CONSOLE_UID" 2>/dev/null |
+    /usr/bin/grep -Fq '"com.apple.eligibilityd" => disabled'; then
+    echo "disabled"
+  else
+    echo "enabled"
+  fi
+}
+
 print_compact_status() {
-  local macos arch sip_state ar_state amfi_state gm_answer loader_state
+  local macos arch sip_state ar_state amfi_state gm_answer loader_state gui_eligibility_state
   macos="$(/usr/bin/sw_vers -productVersion 2>/dev/null || echo unknown)"
   arch="$(/usr/bin/uname -m 2>/dev/null || echo unknown)"
   sip_state="enabled"
@@ -381,6 +395,7 @@ print_compact_status() {
   amfi_disabled && amfi_state="disabled by boot-arg"
   gm_answer="$(answer_label "$(eligibility_answer "$ELIGIBILITYD_PLIST" OS_ELIGIBILITY_DOMAIN_GREYMATTER)")"
   loader_state="$(yes_no loader_installed)"
+  gui_eligibility_state="$(gui_eligibility_agent_state)"
 
   section "Quick status"
   kv "macOS" "$macos ($arch)"
@@ -392,6 +407,7 @@ print_compact_status() {
   kv "country-of-origin=USA" "$(yes_no country_origin_is_usa)"
   kv "kext loaded" "$(yes_no kext_loaded)"
   kv "boot loader" "$loader_state"
+  kv "gui eligibility agent" "$gui_eligibility_state"
   kv "GREYMATTER" "$gm_answer"
 }
 
@@ -494,6 +510,8 @@ print_macos27_state() {
   else
     log "$GM_FEATUREFLAGS_OVERRIDE_PLIST not present"
   fi
+  log "-- GUI eligibility agent --"
+  kv "com.apple.eligibilityd" "$(gui_eligibility_agent_state)"
 }
 
 print_siri_state() {
@@ -1281,9 +1299,19 @@ patch_eligibility_domains() {
 }
 
 force_siri_sae() {
-  section "Force Siri SAE orchestration"
+  section "Refresh Siri orchestration"
   if [[ -z "$CONSOLE_USER" ]]; then
     warn "No console user found; skipping user SiriAvailability"
+    return 0
+  fi
+
+  local major
+  major="$(macos_major_version)"
+  if (( major >= 27 )); then
+    # macOS 27 owns this state and its numeric modes changed after early betas.
+    # A static value can downgrade a newer Linwood route to the legacy shell.
+    note "macOS 27 calculates Siri orchestration dynamically; preserving its current value."
+    as_console_user /usr/bin/defaults read "$SIRI_DOMAIN" "$SIRI_KEY" 2>/dev/null || true
     return 0
   fi
 
@@ -1555,6 +1583,29 @@ PY
   ok "FeatureFlags override installed; backup: $backup_dir"
 }
 
+install_macos27_gui_eligibility_workaround() {
+  section "macOS 27 GUI eligibility workaround"
+  local major
+  major="$(macos_major_version)"
+  if (( major < 27 )); then
+    log "macOS major version is $major; skipping macOS 27-only GUI eligibility workaround."
+    return 0
+  fi
+  if [[ -z "$CONSOLE_USER" || -z "$CONSOLE_UID" ]]; then
+    warn "No console user found; skipping GUI eligibility workaround"
+    return 0
+  fi
+
+  # On macOS 27 beta 2+, a per-user com.apple.eligibilityd can conflict with
+  # the system daemon. assistantd then hits bootstrap error 159 during the
+  # status-bar voice path and the session ends before a final result is shown.
+  /bin/launchctl disable "gui/$CONSOLE_UID/com.apple.eligibilityd" 2>/dev/null || true
+  /bin/launchctl bootout "gui/$CONSOLE_UID/com.apple.eligibilityd" 2>/dev/null || true
+  /bin/launchctl kickstart -k system/com.apple.eligibilityd 2>/dev/null || true
+
+  ok "Disabled conflicting GUI com.apple.eligibilityd for uid=$CONSOLE_UID"
+}
+
 install_macos27_enhanced_siri_overrides() {
   section "macOS 27 Enhanced Siri cloud + GMS overrides"
   local major backup_dir
@@ -1759,6 +1810,7 @@ run_install() {
   [[ "$SKIP_COUNTRYD" == "0" ]] && force_countryd_us
   [[ "$SKIP_APPLE_INTERNAL" == "0" ]] && install_apple_internal_variant
   [[ "$SKIP_MACOS27_SIRI_AI" == "0" ]] && install_macos27_featureflag
+  [[ "$SKIP_MACOS27_SIRI_AI" == "0" ]] && install_macos27_gui_eligibility_workaround
   [[ "$SKIP_MACOS27_SIRI_AI" == "0" ]] && install_macos27_enhanced_siri_overrides
   [[ "$SKIP_MACOS27_SIRI_AI" == "0" && "$SKIP_LAUNCHDAEMON" == "0" ]] && install_macos27_enhanced_siri_repair_launchdaemon
   [[ "$SKIP_WEB_SEARCH" == "0" ]] && force_web_search_provider_google
