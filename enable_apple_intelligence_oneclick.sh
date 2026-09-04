@@ -426,7 +426,10 @@ ensure_plist_file() {
 }
 
 unlock_file() {
-  [[ -e "$1" ]] && /usr/bin/chflags nouchg "$1" 2>/dev/null || true
+  # Clear both user- and system-immutable flags. Some system caches (e.g.
+  # countryd's countryCodeCache.plist) ship with schg, which nouchg alone
+  # cannot remove; without this the plist rewrite fails with EPERM.
+  [[ -e "$1" ]] && /usr/bin/chflags nouchg,noschg "$1" 2>/dev/null || true
 }
 
 lock_file_eligibility() {
