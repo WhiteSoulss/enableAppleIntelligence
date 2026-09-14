@@ -43,7 +43,14 @@ tools/CodexRegionSpoof.kext
 
 ## 前置條件
 
-進 Recovery，Terminal 執行：
+進 Recovery，Terminal 優先嘗試：
+
+```bash
+csrutil enable --without kext
+csrutil authenticated-root disable
+```
+
+如果系統不接受 `csrutil enable --without kext`，再改用：
 
 ```bash
 csrutil disable
@@ -88,6 +95,7 @@ System Settings -> Privacy & Security -> 滑到底部 -> Allow
 ```text
 安裝 / 載入 CodexRegionSpoof.kext
 安裝開機自動載入 LaunchDaemon
+清除下載包 quarantine，避免重啟後 loader 被拒絕
 修正 Apple Intelligence eligibility domains
 修正 Siri SAE availability
 按出口 IP 寫入 GeoServices 定位國家
@@ -98,12 +106,15 @@ macOS 27+ 寫入 EnhancedSiriWaitlist FeatureFlags override
 保留 Location Services 裡 Siri 圖標 runtime patch
 保留 Siri / Safari 搜索 provider 切到 Google 並清理舊 Baidu 搜索
 重啟 AI / Siri / modelcatalog 相關守護進程
+提供 diagnose / PCC 只讀診斷
 ```
 
 ## 常用參數
 
 ```bash
 ./enable_apple_intelligence_oneclick.sh status
+./enable_apple_intelligence_oneclick.sh diagnose
+./enable_apple_intelligence_oneclick.sh pcc --since 30m
 ./enable_apple_intelligence_oneclick.sh --verify-only
 ./enable_apple_intelligence_oneclick.sh --all
 ./enable_apple_intelligence_oneclick.sh --fix-siri-icon
@@ -131,6 +142,7 @@ macOS 27+ 寫入 EnhancedSiriWaitlist FeatureFlags override
 
 ```bash
 ./enable_apple_intelligence_oneclick.sh --verify-only
+./enable_apple_intelligence_oneclick.sh diagnose
 ```
 
 理想狀態：
@@ -150,6 +162,14 @@ sudo tail -100 /var/log/codex-region-spoof-loader.log
 ioreg -rd1 -c IOPlatformExpertDevice | grep -Ei 'region-info|country-of-origin'
 sudo kmutil showloaded | grep -Ei 'Codex|RegionSpoof'
 ```
+
+如果 Apple Intelligence 本地功能已打開，但 ChatGPT extension / 圖樂園 / Siri 雲端功能仍失敗，先跑：
+
+```bash
+./enable_apple_intelligence_oneclick.sh pcc --since 30m
+```
+
+它只讀取系統日誌並分類 PCC 鏈路狀態，不輸出請求內容。
 
 ## 成功後測試
 

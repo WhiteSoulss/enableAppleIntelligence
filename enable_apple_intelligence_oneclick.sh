@@ -20,6 +20,7 @@ SKIP_MACOS27_SIRI_AI=0
 SKIP_SIRI_LOCATION_ICON=0
 SKIP_WEB_SEARCH=0
 DO_ICON_FIX=0
+PCC_SINCE="30m"
 
 KEXT_ID="local.codex.RegionSpoof"
 KEXT_DST="/Library/Extensions/CodexRegionSpoof.kext"
@@ -91,7 +92,7 @@ banner() {
 usage() {
   cat <<'EOF'
 Usage:
-  ./enable_apple_intelligence_oneclick.sh [install|status|uninstall] [options]
+  ./enable_apple_intelligence_oneclick.sh [install|status|diagnose|pcc|uninstall] [options]
 
 Default action:
   install
@@ -99,12 +100,15 @@ Default action:
 Actions:
   install              Install/load region spoof kext and apply AI state fixes.
   status, verify       Print current system state.
+  diagnose, report     Print a copy/paste diagnostic report for troubleshooting.
+  pcc, cloud           Classify recent Private Cloud Compute logs read-only.
   uninstall            Remove this project's kext/LaunchDaemon and unlock caches.
 
 Options:
   --verify-only        Alias for status.
   --uninstall          Alias for uninstall.
   --dry-run            With uninstall, show actions without changing files.
+  --since 30m          With pcc/diagnose, choose the log window.
   --skip-kext          Do not install/load CodexRegionSpoof.kext this run.
   --skip-launchdaemon  Do not install/update the boot-time loader.
   --skip-eligibility   Do not patch eligibility plist domains.
@@ -127,7 +131,8 @@ Options:
   -h, --help           Show this help.
 
 Recovery prerequisites:
-  csrutil disable
+  csrutil enable --without kext
+  If your macOS rejects that command, use: csrutil disable
   csrutil authenticated-root disable
   Startup Security Utility -> Reduced Security -> allow kernel extensions
 
@@ -135,8 +140,9 @@ After success, the recommended higher-security state is:
   csrutil authenticated-root enable
   FileVault on
 
-Do not run csrutil enable while using the bundled ad-hoc kext. With SIP fully
-enabled, the kext will not load and the Mac will naturally fall back to CH.
+Do not run csrutil enable while using the bundled ad-hoc kext. With kext
+signing checks fully enabled, the kext will not load and the Mac will naturally
+fall back to CH.
 EOF
 }
 
@@ -145,8 +151,14 @@ while [[ $# -gt 0 ]]; do
     install)
       ACTION="install"
       ;;
-    status|verify|doctor)
+    status|verify)
       ACTION="status"
+      ;;
+    diagnose|report|doctor|log)
+      ACTION="diagnose"
+      ;;
+    pcc|cloud)
+      ACTION="pcc"
       ;;
     icon)
       ACTION="icon"
@@ -164,6 +176,11 @@ while [[ $# -gt 0 ]]; do
     --dry-run)
       ACTION="uninstall"
       DRY_RUN=1
+      ;;
+    --since)
+      shift
+      [[ $# -gt 0 ]] || die "--since requires a value, for example 30m or 2h"
+      PCC_SINCE="$1"
       ;;
     --all)
       ACTION="install"
@@ -221,6 +238,7 @@ if [[ "$(id -u)" != "0" ]]; then
   log "Need administrator privileges. Re-running with sudo..."
   sudo_args=("$ACTION")
   [[ "$DRY_RUN" == "1" ]] && sudo_args+=(--dry-run)
+  [[ "$PCC_SINCE" != "30m" ]] && sudo_args+=(--since "$PCC_SINCE")
   [[ "$FORCE_GEOSERVICES_US" == "1" ]] && sudo_args+=(--force-geoservices-us)
   [[ "$SKIP_KEXT" == "1" ]] && sudo_args+=(--skip-kext)
   [[ "$SKIP_LAUNCHDAEMON" == "1" ]] && sudo_args+=(--skip-launchdaemon)
@@ -283,12 +301,33 @@ macos_major_version() {
   echo "$major"
 }
 
+sip_fully_off() {
+  /usr/bin/csrutil status 2>/dev/null |
+    /usr/bin/grep -qi 'System Integrity Protection status: disabled'
+}
+
+sip_allows_kext() {
+  local status
+  status="$(/usr/bin/csrutil status 2>/dev/null || true)"
+  printf '%s\n' "$status" | /usr/bin/grep -qi 'System Integrity Protection status: disabled' ||
+    printf '%s\n' "$status" | /usr/bin/grep -Eqi 'Kext Signing:[[:space:]]*disabled'
+}
+
 sip_disabled() {
-  /usr/bin/csrutil status 2>/dev/null | /usr/bin/grep -qi disabled
+  sip_fully_off
+}
+
+amfi_bypass_bootarg() {
+  /usr/sbin/nvram boot-args 2>/dev/null |
+    /usr/bin/grep -Eq '(^|[[:space:]])amfi_get_out_of_my_way(=[0-9]+)?([[:space:]]|$)'
 }
 
 amfi_disabled() {
-  /usr/sbin/nvram boot-args 2>/dev/null | /usr/bin/grep -q 'amfi_get_out_of_my_way'
+  amfi_bypass_bootarg
+}
+
+amfi_launch_constraints() {
+  /usr/sbin/sysctl -n security.mac.amfi.launch_constraints_enforced 2>/dev/null || echo "unknown"
 }
 
 kext_loaded() {
@@ -302,8 +341,9 @@ root_region_is_spoofed() {
 }
 
 country_origin_is_usa() {
+  # ioreg may render country-of-origin as hex data (555341) or as <"USA">.
   /usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null |
-    /usr/bin/grep -qi '555341'
+    /usr/bin/grep -Eqi '555341|"USA"'
 }
 
 yes_no() {
@@ -354,7 +394,11 @@ print_compact_status() {
   macos="$(/usr/bin/sw_vers -productVersion 2>/dev/null || echo unknown)"
   arch="$(/usr/bin/uname -m 2>/dev/null || echo unknown)"
   sip_state="enabled"
-  sip_disabled && sip_state="disabled"
+  if sip_fully_off; then
+    sip_state="disabled"
+  elif sip_allows_kext; then
+    sip_state="kext signing disabled"
+  fi
   ar_state="$(auth_root_state)"
   [[ -n "$ar_state" ]] || ar_state="unknown"
   amfi_state="enabled"
@@ -389,6 +433,23 @@ ensure_plist_file() {
 
 unlock_file() {
   [[ -e "$1" ]] && /usr/bin/chflags nouchg "$1" 2>/dev/null || true
+}
+
+strip_quarantine() {
+  local target
+  for target in "$@"; do
+    [[ -e "$target" ]] || continue
+    /usr/bin/xattr -dr com.apple.quarantine "$target" 2>/dev/null || true
+  done
+
+  for target in "$@"; do
+    [[ -e "$target" ]] || continue
+    if /usr/bin/xattr -lr "$target" 2>/dev/null | /usr/bin/grep -q 'com.apple.quarantine'; then
+      warn "quarantine remains on $target; LaunchDaemon or kext loading may be blocked after reboot."
+      return 0
+    fi
+  done
+  ok "cleared quarantine attributes for installed files"
 }
 
 lock_file_eligibility() {
@@ -498,13 +559,21 @@ preflight_install() {
     die "This project only supports Apple Silicon."
   fi
 
-  if ! sip_disabled; then
+  if ! sip_allows_kext; then
     cat >&2 <<'MSG'
-SIP is still enabled. The bundled kext is ad-hoc signed and will not load.
+The current SIP policy still enforces kext signing. The bundled ad-hoc kext
+will not load in this state.
 
 Boot to Recovery and run:
 
+  csrutil enable --without kext
+
+If your macOS rejects that command, use:
+
   csrutil disable
+
+For macOS 27 AppleInternalVariant support, also run:
+
   csrutil authenticated-root disable
 
 Then open Startup Security Utility:
@@ -514,8 +583,10 @@ Then open Startup Security Utility:
 Reboot and run this script again.
 MSG
     exit 1
+  elif sip_fully_off; then
+    warn "SIP is fully disabled; kext can load, but only kext-signing exemption is needed."
   else
-    ok "SIP is disabled; kext can be loaded in Permissive/Reduced Security"
+    ok "SIP policy allows ad-hoc kext loading"
   fi
 
   if amfi_disabled; then
@@ -565,6 +636,7 @@ install_kext() {
   /usr/sbin/chown -R root:wheel "$KEXT_DST"
   /bin/chmod -R go-w "$KEXT_DST"
   ok "installed kext bundle to $KEXT_DST"
+  strip_quarantine "$KEXT_DST"
 
   /usr/bin/codesign -dv --verbose=2 "$KEXT_DST" 2>&1 |
     /usr/bin/grep -E 'Identifier=|Signature=|TeamIdentifier=' || true
@@ -829,6 +901,12 @@ payload = {
         "source": 262,
     }
 }
+with open(path, "wb") as f:
+    plistlib.dump(payload, f)
+PY
+  /usr/sbin/chown _locationd:_locationd "$GEOSERVICES_DIRECT_STORE" 2>/dev/null || true
+  /bin/chmod 0644 "$GEOSERVICES_DIRECT_STORE" 2>/dev/null || true
+}
 
 clean_siri_location_rows_for_icon_fix() {
   [[ "\$SIRI_LOCATION_ICON_MODE" == "1" ]] || return 0
@@ -902,12 +980,6 @@ apply_siri_location_icon_fix() {
   clean_siri_location_rows_for_icon_fix || true
   /usr/bin/killall "System Settings" SecurityPrivacyExtension cfprefsd iconservicesagent IconServicesAgent 2>/dev/null || true
 }
-with open(path, "wb") as f:
-    plistlib.dump(payload, f)
-PY
-  /usr/sbin/chown _locationd:_locationd "$GEOSERVICES_DIRECT_STORE" 2>/dev/null || true
-  /bin/chmod 0644 "$GEOSERVICES_DIRECT_STORE" 2>/dev/null || true
-}
 
 {
   echo "==== \$(date) ===="
@@ -971,6 +1043,7 @@ install_launchdaemon() {
 EOF
   /usr/sbin/chown root:wheel "$LOADER_PLIST"
   /bin/chmod 644 "$LOADER_PLIST"
+  strip_quarantine "$KEXT_DST" "$LOADER_SCRIPT" "$LOADER_PLIST" "$SIRI_LOCATION_FIX_DIR"
 
   /bin/launchctl bootout system "$LOADER_PLIST" 2>/dev/null || true
   /bin/launchctl bootstrap system "$LOADER_PLIST" 2>/dev/null || true
@@ -1488,6 +1561,166 @@ refresh_ai_daemons() {
   [[ -n "$CONSOLE_USER" ]] && as_console_user /usr/bin/killall "System Settings" SiriPreferenceExtension SiriNCService Siri cfprefsd 2>/dev/null || true
 }
 
+valid_pcc_since() {
+  [[ "$1" == <->(s|m|h|d) ]]
+}
+
+last_log_line_no() {
+  local pattern="$1"
+  local file="$2"
+  /usr/bin/grep -inE "$pattern" "$file" 2>/dev/null |
+    /usr/bin/tail -1 |
+    /usr/bin/cut -d: -f1
+}
+
+timestamp_of_log_line() {
+  printf '%s\n' "$1" |
+    /usr/bin/awk '{print $1 " " $2}' |
+    /usr/bin/sed 's/[[:space:]]*$//'
+}
+
+run_pcc_diagnose() {
+  local embedded="${1:-0}"
+  [[ "$embedded" == "1" ]] || banner "pcc diagnostic"
+  section "Private Cloud Compute read-only diagnostic"
+
+  valid_pcc_since "$PCC_SINCE" || die "Invalid --since value: $PCC_SINCE. Use 30m, 2h, 1d, etc."
+
+  local tmp log_file context_file terminal_no terminal_line context_start
+  local token_ok_no token_bad_no app_timeout_no inline_line inline_total
+  local client_app use_case store_db available_nodes bundle_count
+
+  tmp="$(/usr/bin/mktemp -d /private/tmp/codex-pcc.XXXXXX)"
+  log_file="$tmp/combined.log"
+  context_file="$tmp/request-context.log"
+
+  /usr/bin/log show --style compact --info --last "$PCC_SINCE" \
+    --predicate '(process == "privatecloudcomputed" OR process == "networkserviceproxy" OR process == "generativeexperiencesd")' \
+    >"$log_file" 2>/dev/null || true
+
+  terminal_no="$(last_log_line_no 'Ropes request (finished successfully|failed)' "$log_file")"
+  terminal_line=""
+  if [[ -n "$terminal_no" ]]; then
+    terminal_line="$(/usr/bin/sed -n "${terminal_no}p" "$log_file")"
+    context_start=$(( terminal_no > 300 ? terminal_no - 300 : 1 ))
+    /usr/bin/sed -n "${context_start},${terminal_no}p" "$log_file" >"$context_file"
+  else
+    : >"$context_file"
+  fi
+
+  token_ok_no="$(last_log_line_no 'Received [0-9]+/[0-9]+/[0-9]+ tokens|Token fetch successful' "$log_file")"
+  token_bad_no="$(last_log_line_no 'no key found in configuration for issuer name|failed to (fetch|get).*tokens|token request failed' "$log_file")"
+  app_timeout_no="$(last_log_line_no 'workload timed out before completing|GenerativeError Code=5040000' "$log_file")"
+  inline_line="$(/usr/bin/grep -iE 'inline nodes ready|totalReceived=' "$context_file" 2>/dev/null | /usr/bin/tail -1 || true)"
+  inline_total="$(printf '%s\n' "$inline_line" | /usr/bin/sed -nE 's/.*totalReceived[=:][[:space:]]*([0-9]+).*/\1/p')"
+  client_app="$(/usr/bin/grep -ioE 'clientApplicationIdentifier[=:][[:space:]]*com\.apple\.[A-Za-z0-9._-]+' "$context_file" 2>/dev/null |
+    /usr/bin/sed -E 's/.*[=:][[:space:]]*//' |
+    /usr/bin/grep -v '^com\.apple\.suggestd$' |
+    /usr/bin/tail -1 || true)"
+  use_case="$(/usr/bin/grep -ioE 'useCaseIdentifier[=:][[:space:]]*[A-Za-z0-9._-]+' "$context_file" 2>/dev/null |
+    /usr/bin/tail -1 |
+    /usr/bin/sed -E 's/.*[=:][[:space:]]*//' || true)"
+
+  if command -v /usr/sbin/lsof >/dev/null 2>&1 && command -v /usr/bin/sqlite3 >/dev/null 2>&1; then
+    store_db="$(/usr/sbin/lsof -c privatecloudcomputed -Fn 2>/dev/null |
+      /usr/bin/sed -n 's/^n//p' |
+      /usr/bin/grep -m1 '/attestationstore_v3/db.sqlite$' || true)"
+    if [[ -n "$store_db" ]]; then
+      available_nodes="$(/usr/bin/sqlite3 -readonly "$store_db" 'SELECT count(*) FROM ZAVAILABLENODE;' 2>/dev/null || true)"
+      bundle_count="$(/usr/bin/sqlite3 -readonly "$store_db" 'SELECT count(*) FROM ZNODEBUNDLE;' 2>/dev/null || true)"
+    fi
+  fi
+
+  kv "window" "$PCC_SINCE"
+  [[ -n "$client_app" ]] && kv "client app" "$client_app"
+  [[ -n "$use_case" ]] && kv "use case" "$use_case"
+  [[ -n "${available_nodes:-}" ]] && kv "attestation pool" "available=$available_nodes, bundles=${bundle_count:-?}"
+
+  if [[ -z "$terminal_no" ]]; then
+    warn "NO_RECENT_REQUEST: no finished PCC request found in the selected window."
+    note "Trigger one harmless online AI action, wait about 60 seconds, then rerun: $SELF pcc --since $PCC_SINCE"
+  elif printf '%s\n' "$terminal_line" | /usr/bin/grep -qi 'finished successfully'; then
+    ok "HEALTHY: the latest PCC request finished successfully."
+    kv "time" "$(timestamp_of_log_line "$terminal_line")"
+    [[ -n "$app_timeout_no" ]] && warn "An app-side timeout also appeared in the same window; the PCC path may be slow even though it eventually succeeds."
+  else
+    kv "latest request" "failed at $(timestamp_of_log_line "$terminal_line")"
+    if /usr/bin/grep -qiE '32001|RetryAfter' "$context_file"; then
+      warn "RATE_LIMITED: Apple server-side throttling detected."
+      note "Stop repeated clicking and wait before retrying."
+    elif /usr/bin/grep -qiE 'NWError[^0-9]*Code[=:][[:space:]]*89|32057|32080|Insufficient inline' "$context_file" ||
+      { [[ -n "$inline_total" && "$inline_total" == <-> && "$inline_total" -lt 2 ]]; }; then
+      warn "RELAY_OR_INLINE_TIMEOUT: relay/inline attestation delivery looks incomplete."
+      [[ -n "$inline_total" ]] && kv "inline nodes" "$inline_total"
+      note "This is a PCC/network-delivery problem, not the same as GREYMATTER or local model eligibility."
+    elif /usr/bin/grep -qiE 'AttestationStoreError|attestation store.*empty|no available attestation' "$context_file"; then
+      warn "ATTESTATION_CACHE_MISS: local attestation cache was empty or missed."
+      note "Wait and retry once; deleting databases is usually not the first fix."
+    else
+      warn "PCC_REQUEST_FAILED: request failed but did not match a known simple pattern."
+      note "Run diagnose and include this classification in the issue."
+    fi
+  fi
+
+  if [[ -n "${available_nodes:-}" && "$available_nodes" == <-> && "$available_nodes" -eq 0 ]]; then
+    warn "Reusable attestation pool is empty; the next request may rely on inline attestation and time out."
+  fi
+
+  if [[ -n "$token_ok_no" && ( -z "$token_bad_no" || "$token_ok_no" -gt "$token_bad_no" ) ]]; then
+    ok "relay token status: recently replenished"
+  elif [[ -n "$token_bad_no" ]]; then
+    warn "relay token status: recent token fetch failure"
+  else
+    warn "relay token status: no clear token replenishment record in this window"
+  fi
+
+  /bin/rm -rf "$tmp"
+}
+
+run_diagnose() {
+  banner "diagnose"
+  log "Copy this report into a GitHub issue if you need help."
+  print_compact_status
+
+  section "System"
+  kv "macOS" "$(/usr/bin/sw_vers -productVersion 2>/dev/null || echo unknown) ($(/usr/bin/sw_vers -buildVersion 2>/dev/null || echo unknown))"
+  kv "Model" "$(/usr/sbin/sysctl -n hw.model 2>/dev/null || echo unknown)"
+  kv "Architecture" "$(/usr/bin/uname -m 2>/dev/null || echo unknown)"
+  kv "Console user" "${CONSOLE_USER:-none}"
+
+  section "Security"
+  /usr/bin/csrutil status 2>&1 || true
+  /usr/bin/csrutil authenticated-root status 2>&1 || true
+  kv "SIP allows kext" "$(yes_no sip_allows_kext)"
+  kv "SIP fully off" "$(yes_no sip_fully_off)"
+  kv "AMFI bypass boot-arg" "$(yes_no amfi_bypass_bootarg)"
+  kv "AMFI launch constraints" "$(amfi_launch_constraints)"
+  kv "boot-args" "$(/usr/sbin/nvram boot-args 2>/dev/null | /usr/bin/sed 's/^boot-args[[:space:]]*//' || echo '(empty)')"
+  /usr/sbin/bputil -d 2>/dev/null |
+    /usr/bin/grep -E 'Security Mode|3rd Party Kexts|Signed System Volume|System Integrity Protection' |
+    /usr/bin/head -10 || true
+
+  print_root_identity
+  print_kext_state
+  print_eligibility_answers
+  print_country_state
+  print_macos27_state
+  print_siri_state
+
+  section "Language"
+  if [[ -n "$CONSOLE_USER" ]]; then
+    kv "AppleLanguages" "$(as_console_user /usr/bin/defaults read -g AppleLanguages 2>/dev/null | /usr/bin/tr -d '\n' | /usr/bin/sed 's/[[:space:]]//g' || echo 'unknown')"
+    kv "Siri Session Language" "$(as_console_user /usr/bin/defaults read com.apple.assistant.backedup 'Session Language' 2>/dev/null || echo 'unset')"
+    note "For new Siri, keep system/Siri language on an Apple Intelligence supported English locale when troubleshooting."
+  else
+    warn "No console user found; skipping language diagnostics."
+  fi
+
+  run_pcc_diagnose 1
+  section "End"
+  log "Diagnostic report finished. No PCC payload or account content was printed."
+}
+
 run_status() {
   banner "status"
   print_compact_status
@@ -1628,6 +1861,12 @@ case "$ACTION" in
     ;;
   status)
     run_status
+    ;;
+  diagnose)
+    run_diagnose
+    ;;
+  pcc)
+    run_pcc_diagnose
     ;;
   icon)
     banner "Siri icon refresh"
