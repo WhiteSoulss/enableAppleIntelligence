@@ -50,12 +50,13 @@ csrutil disable
 csrutil authenticated-root disable
 ```
 
-Startup Security Utility 裡設置：
+Startup Security Utility 裡保持 `csrutil disable` 後的 `Permissive Security` 狀態，不要改選 `Reduced Security`；只保留以下 kernel extension 選項啟用：
 
 ```text
-Reduced Security
 Allow user management of kernel extensions from identified developers
 ```
+
+注意：在 Startup Security Utility 改選 `Reduced Security` 會重新啟用 SIP / Signed System Volume，撤銷前面的 `csrutil disable` / `csrutil authenticated-root disable`，導致 issue #3 中的 `Bad code signature` 和 `Operation not permitted` 問題。
 
 重啟回 macOS。
 
